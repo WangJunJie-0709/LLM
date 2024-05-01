@@ -1,5 +1,4 @@
-import os
-import requests
+import tqdm
 import math
 import tiktoken
 import torch
@@ -232,7 +231,7 @@ def estimate_loss():
 # Use AdamW optimizer
 optimizer = torch.optim.AdamW(params=model.parameters(), lr=learning_rate)
 tracked_losses = list()
-for step in range(max_iters):
+for step in tqdm.tqdm(range(max_iters)):
     if step % eval_iters == 0 or step == max_iters - 1:
         losses = estimate_loss()
         tracked_losses.append(losses)
@@ -253,7 +252,7 @@ model.eval()
 start = 'The salesperson'
 start_ids = encoding.encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
-y = model.generate(x, max_new_tokens=100)
+y = model.generate(x, max_new_tokens=2000)
 print('---------------')
 print(encoding.decode(y[0].tolist()))
 print('---------------')
