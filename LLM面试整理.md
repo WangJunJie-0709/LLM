@@ -8,4 +8,10 @@
 
 
 
+
+
+### Layer Normalization（层归一化的作用）
+
+
+
 为什么
