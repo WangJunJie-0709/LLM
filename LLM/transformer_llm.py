@@ -19,6 +19,10 @@ eval_interval = hyperparameters['eval_interval']  # How often to evaluate
 eval_iters = hyperparameters['eval_iters']  # Number of iterations to average for evaluation
 device = hyperparameters['device']  # Use GPU if it's available.
 TORCH_SEED = 1337
+
+
+
+
 torch.manual_seed(TORCH_SEED)
 
 # Load training data

@@ -9,3 +9,4 @@ def get_openai_key():
 
 
 openai.api_key = get_openai_key()
+print(openai.api_key)
