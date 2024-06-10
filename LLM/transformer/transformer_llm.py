@@ -26,7 +26,7 @@ TORCH_SEED = 1337
 torch.manual_seed(TORCH_SEED)
 
 # Load training data
-with open('../Data/sales_textbook.txt', 'r', encoding='utf-8') as f:
+with open('../../Data/sales_textbook.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
 # Using TikToken (Same as GPT3) to tokenize the source text
