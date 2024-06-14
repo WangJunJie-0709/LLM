@@ -2,3 +2,5 @@
 model-ckpt.pt
 .env
 \Pretrained_models
+*.iml
+*.xml
