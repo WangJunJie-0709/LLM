@@ -48,11 +48,96 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
 
   ![embedding1](img/LLM/ch01/embedding%5B1%5D.png)
 
+- 现在，让我们转换之前定义的所有训练示例
 
+  ```python
+  idx = torch.tensor([2, 3, 1])
+  embedding_layers(idx)
+  ```
+
+  ```
+  tensor([[ 0.6957, -1.8061, -1.1589,  0.3255, -0.6315],
+          [-2.8400, -0.7849, -1.4096, -0.4076,  0.7953],
+          [ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
+         grad_fn=<EmbeddingBackward0>)
+  ```
+
+  ![embedding_lookup](img/LLM/ch01/embedding_lookup.png)
 
 ### Linear层
 
+- 现在，我们将要证明上面的Embedding层实现了与nn完全相同的功能，即Pytorch中一个热编码表示的线性层
 
+- 首先，我们将token IDs转换为一个热表示
+
+  ```python
+  onehot = torch.nn.functional.one_hot(idx)
+  onehot
+  ```
+
+  ```
+  tensor([[0, 0, 1, 0],
+          [0, 0, 0, 1],
+          [0, 1, 0, 0]])
+  ```
+
+- 接下来，我们初始化一个线性层，它进行矩阵乘法 **XW^T**
+
+  ```python
+  torch.manual_seed(123)
+  linear = torch.nn.Linear(num_idx, output_dim, bias=False)
+  linear.weight
+  ```
+
+  ```
+  Parameter containing:
+  tensor([[-0.2039,  0.0166, -0.2483,  0.1886],
+          [-0.4260,  0.3665, -0.3634, -0.3975],
+          [-0.3159,  0.2264, -0.1847,  0.1871],
+          [-0.4244, -0.3034, -0.1836, -0.0983],
+          [-0.3814,  0.3274, -0.1179,  0.1605]], requires_grad=True)
+  ```
+
+- 需要注意的是，Pytorch中的线性层也使用小的随机权重进行初始化。要直接将其与上面的Embedding层进行比较，我们必须使用相同的小随机权重
+
+  ```python
+  linear.weight = torch.nn.Parameter(embedding_layers.weight.T.detach())
+  ```
+
+- 现在，我们可以在输入的热编码表示上使用线性层
+
+  ```python
+  linear(onehot.float())
+  ```
+
+  ```
+  tensor([[ 0.6957, -1.8061, -1.1589,  0.3255, -0.6315],
+          [-2.8400, -0.7849, -1.4096, -0.4076,  0.7953],
+          [ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]], grad_fn=<MmBackward0>)
+  ```
+
+- 正如我们所看到的，这与我们使用Embedding层时得到的结果完全相同
+
+  ```python
+  embedding_layers(idx)
+  ```
+
+  ```
+  tensor([[ 0.6957, -1.8061, -1.1589,  0.3255, -0.6315],
+          [-2.8400, -0.7849, -1.4096, -0.4076,  0.7953],
+          [ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
+         grad_fn=<EmbeddingBackward0>)
+  ```
+
+- 第一个训练示例的token ID的计算
+
+  ![Alt text](img/LLM/ch01/example_first.png)
+
+  ![Alt text](img/LLM/ch01/example_second.png)
+
+- 由于每一个热编码行中除一个索引外的所有索引都为0（按设计），因此此矩阵乘法基本上与查找一个热元素相同
+
+- 在一个热编码上使用矩阵乘法相当于嵌入层查找，但如果我们使用大的Embedding矩阵，则可能效率低下，因为存在大量浪费的乘零运算
 
 ## Transformer基础架构
 
@@ -195,7 +280,7 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
 
 ![文本嵌入](img/LLM/ch01/forms_of_embedding.png)
 
-- LLM与高维空间中的 embedding向量 共同起作用
+- LLM与高维空间中的 embedding 向量共同起作用
 - 由于我们无法可视化这样的高维空间，下图说明了一个 2维 嵌入空间
 
 ![高维空间](img/LLM/ch01/high_dimensional_space.png)
@@ -366,15 +451,15 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
           return text
   ```
 
-  - encode函数将词表转换为token IDs
+  - encode 函数将词表转换为 token IDs
 
-  - decode函数将token IDs转换回文本
+  - decode 函数将 token IDs 转换回文本
 
     ![encode and decode](img/LLM/ch01/encode_decode.png)
 
-- 我们可以用tokenizer将文本转换为整数，这些整数可以作为LLM的embedding输入层
+- 我们可以用tokenizer将文本转换为整数，这些整数可以作为 LLM 的 Embedding 输入层
 
-- 将token IDs decode回文本
+- 将 token IDs decode 回文本
 
 ### 1.4 加入特殊文本tokens
 
@@ -383,7 +468,7 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
 
 ![special_token](img/LLM/ch01/special_token.png)
 
-- 一些 tokenizer 使用特殊的 tokens 来帮助LLM提供额外的上下文
+- 一些 tokenizer 使用特殊的 tokens 来帮助 LLM 提供额外的上下文
 
 - 其中一些特殊 tokens 是
   - **[BOS]**（序列的开始）标记文本的开始
@@ -392,8 +477,8 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
   - **[UNK]** 表示未包含在词汇表中的词汇
 - 请注意，GPT-2不需要上述任何tokens，而只使用<|endoftext|> token 来降低复杂性
 - **<|endoftext|>** 类似于上面提到的 [EOS] token
-- GPT还使用 <|endoftext|> 进行填充（因为我们在对批处理输入进行训练时通常使用掩码，所以无论如何我们都不会使用填充的tokens，所以这些tokens是什么并不重要）
-- GPT-2不对词汇表外的单词使用 <|UNK|> 标记；相反，GPT-2使用了一个字节对编码（BPE）标记器，它将字分解为子字单元，我们将在后面的部分中讨论
+- GPT还使用 <|endoftext|> 进行填充（因为我们在对批处理输入进行训练时通常使用掩码，所以无论如何我们都不会使用填充的tokens，所以这些 tokens 是什么并不重要）
+- GPT-2不对词汇表外的单词使用 <|UNK|> 标记；相反，GPT-2 使用了一个字节对编码（BPE）标记器，它将字分解为子字单元，我们将在后面的部分中讨论
 
 ![endoftext_example](img/LLM/ch01/endoftext_example.png)
 
@@ -409,7 +494,7 @@ tokenizer.encode(text)
 
 - 由于词表中未包含 Hello 一词，因此上述操作会报错
 
-- 为了处理这种情况，我们可以向词表中添加特殊的标记，如<|UNK|>，以表示未知单词
+- 为了处理这种情况，我们可以向词表中添加特殊的标记，如 <|UNK|>，以表示未知单词
 
 - 由于我们已经扩展词表，让我们添加一个 <|endoftext|> 标记，它在 GPT-2 训练中表示文本的末尾
 
@@ -470,7 +555,7 @@ tokenizer.encode(text)
           return text
   ```
 
-- 用修正后的tokenizer尝试一下
+- 用修正后的 tokenizer 尝试一下
 
   ```python
   tokenizer = SimpleTokenizerV2(vocab)
@@ -574,7 +659,7 @@ tokenizer.encode(text)
   ```python
   with open("../../../Data/the-verdict.txt", "r", encoding="utf-8") as f:
       raw_text = f.read()
-      
+  
   enc_text = tokenizer.encode(raw_text)
   print(len(enc_text)) # 5145
   ```
@@ -589,12 +674,12 @@ tokenizer.encode(text)
   y = enc_sample[1:context_size+1]
   
   print(f'x: {x}')
-  print(f'y:     {y}')
+  print(f'y:      {y}')
   ```
 
   ```
   x: [290, 4920, 2241, 287]
-  y:     [4920, 2241, 287, 257]
+  y:      [4920, 2241, 287, 257]
   ```
 
 - 一个接着一个，预测如下
@@ -753,11 +838,11 @@ tokenizer.encode(text)
 
 - 使用嵌入层将标记嵌入到连续向量表示中
 
-- 通常这些嵌入层是LLM本身的一部分，并在模型训练期间进行更新训练
+- 通常这些嵌入层是 LLM 本身的一部分，并在模型训练期间进行更新训练
 
   ![GPT pipeline](img/LLM/ch01/GPT_pipeline.png)
 
-- 假设我们有以下四个输入示例，输入ID分别为5、1、3和2（标记之后）。且为了简单起见，假设我们的词汇量很小，只有6个单词，并且我们想要创建大小为3的嵌入
+- 假设我们有以下四个输入示例，输入 ID 分别为5、1、3和2（标记之后）。且为了简单起见，假设我们的词汇量很小，只有6个单词，并且我们想要创建大小为3的嵌入
 
   ```python
   input_ids = torch.tensor([2, 3, 5, 1])
@@ -786,7 +871,7 @@ tokenizer.encode(text)
 
 - 详细区别可以看 [理解Embedding层和线性层的区别](#Transformer相关-理解Embedding层和线性层的区别)
 
-- 要将id为3的token转换为三维向量，执行以下操作
+- 要将 id 为 3 的 token 转换为三维向量，执行以下操作
 
   ```python
   print(embedding_layer(torch.tensor([3])))
@@ -796,7 +881,7 @@ tokenizer.encode(text)
   tensor([[-0.4015,  0.9666, -1.1481]], grad_fn=<EmbeddingBackward0>)
   ```
 
-- 注意,上面是embedding_layer权重矩阵中的第4行。要嵌入上面的所有四个input_ids值，我们需要进行以下操作
+- 注意,上面是 embedding_layer 权重矩阵中的第4行。要嵌入上面的所有四个 input_ids 值，我们需要进行以下操作
 
   ```python
   print(embedding_layer(input_ids))
@@ -809,13 +894,96 @@ tokenizer.encode(text)
           [ 0.9178,  1.5810,  1.3010]], grad_fn=<EmbeddingBackward0>)
   ```
 
-- 所以Embedding层本质上就是一种查找操作
+- 所以 Embedding 层本质上就是一种查找操作
 
   ![Embedding层](img/LLM/ch01/embedding_layer.png)
 
 ### 1.8 编码单词位置
 
+- Embedding 层将 ID 转换为相同的矢量表示，而不考虑它们在输入序列中的位置
 
+  ![Alt text](img/LLM/ch01/embedding_layer_example.png)
+
+- 位置嵌入与标记嵌入向量相结合，形成 LLM 的输入嵌入
+
+  ![Alt text](img/LLM/ch01/position_embedding.png)
+
+- BytePair编码器的词表大小为50257
+
+- 假设我们将输入 token 编码为256维向量表示
+
+  ```python
+  vocab_size = 50257
+  output_dim = 256
+  
+  token_embedding_layer = torch.nn.Embedding(vocab_size, output_dim)
+  ```
+
+- 如果我们从数据加载器中采样数据，我们将每个批次中的token嵌入到256维向量中
+
+- 假设我们有一个批量大小为8，每批有4个token，则会产生一个8 × 4 × 256的张量
+
+  ```python
+  max_length = 4
+  dataloader = create_dataloader_v1(
+      raw_text, batch_size=8, max_length=max_length,
+      stride=max_length, shuffle=False
+  )
+  data_iter = iter(dataloader)
+  inputs, targets = next(data_iter)
+  print("Token IDs:\n", inputs)
+  print("\nInputs shape:\n", inputs.shape)
+  ```
+
+  ```
+  Token IDs:
+   tensor([[   40,   367,  2885,  1464],
+          [ 1807,  3619,   402,   271],
+          [10899,  2138,   257,  7026],
+          [15632,   438,  2016,   257],
+          [  922,  5891,  1576,   438],
+          [  568,   340,   373,   645],
+          [ 1049,  5975,   284,   502],
+          [  284,  3285,   326,    11]])
+  
+  Inputs shape:
+   torch.Size([8, 4])
+  ```
+
+  ```python
+  token_embeddings = token_embedding_layer(inputs)
+  print(token_embeddings.shape)
+  ```
+
+  ```
+  torch.Size([8, 4, 256])
+  ```
+
+- GPT-2使用绝对位置嵌入，因此我们只需要创建另一个Embedding层
+
+  ```python
+  context_length = max_length
+  pos_embedding_layer = torch.nn.Embedding(context_length, output_dim)
+  pos_embeddings = pos_embedding_layer(torch.arange(max_length))
+  print(pos_embeddings.shape)
+  ```
+
+  ```
+  torch.Size([4, 256])
+  ```
+
+- 要创建LLM中使用的输入嵌入，我们只需要添加标记和位置嵌入
+
+  ```python
+  input_embeddings = token_embeddings + pos_embeddings
+  print(input_embeddings.shape)  # torch.Size([8, 4, 256])
+  ```
+
+- 在输入处理工作流的初始截断，输入文本被分割成单独的标记
+
+- 在分割之后，这些token被转换为基于预定义词表的token IDs
+
+  ![Alt text](img/LLM/ch01/vocabulary_with_GPT_pipeline.png)
 
 ## 二、构建注意力机制
 
