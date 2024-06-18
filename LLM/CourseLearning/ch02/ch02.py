@@ -3,9 +3,9 @@ import torch.nn as nn
 
 
 class CausalAttention(nn.Module):
-
     def __init__(self, d_in, d_out, context_length, dropout, qkv_bias=False):
         super().__init__()
+
         self.d_out = d_out
         self.W_q = nn.Linear(d_in, d_out, bias=qkv_bias)
         self.W_k = nn.Linear(d_in, d_out, bias=qkv_bias)

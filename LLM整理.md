@@ -800,7 +800,7 @@ tokenizer.encode(text)
 
 - 我们还可以创建批处理输出
 
-- 在这里增加步长，这样批次之间就不会有重叠，因为更多的重叠可能会导致过拟合
+- 在这里增加步长，这样批次之间就不会有重叠，因为**更多的重叠可能会导致过拟合**
 
   ```python
   dataloader = create_dataloader_v1(raw_text, batch_size=8, max_length=4, stride=4, shuffle=False)
@@ -834,11 +834,11 @@ tokenizer.encode(text)
   
   ```
 
-### 1.7 创建token embedding向量
+### 1.7 创建token Embedding向量
 
-- 使用嵌入层将标记嵌入到连续向量表示中
+- 使用 Embedding 层将标记嵌入到连续向量表示中
 
-- 通常这些嵌入层是 LLM 本身的一部分，并在模型训练期间进行更新训练
+- 通常这些 Embedding 层是 LLM 本身的一部分，并在模型训练期间进行更新训练
 
   ![GPT pipeline](img/LLM/ch01/GPT_pipeline.png)
 
@@ -865,9 +865,9 @@ tokenizer.encode(text)
           [-2.8400, -0.7849, -1.4096]], requires_grad=True)
   ```
 
-- 对于熟悉热编码的人来说，上面的embedding层方法本质上只是在全连接层中实现一个热编码器，然后进行矩阵乘法的更有效的方法
+- 对于熟悉热编码的人来说，上面的 Embedding 层方法本质上只是在全连接层中实现一个热编码器，然后进行矩阵乘法的更有效的方法
 
-- 因为嵌入层只是一种更有效的实现，相当于一个热编码器和矩阵乘法方法，所以它可以被视为一个可以通过反向传播优化的神经网络层
+- 因为 Embedding 层只是一种更有效的实现，相当于一个热编码器和矩阵乘法方法，所以它可以被视为一个可以通过反向传播优化的神经网络层
 
 - 详细区别可以看 [理解Embedding层和线性层的区别](#Transformer相关-理解Embedding层和线性层的区别)
 
@@ -986,6 +986,988 @@ tokenizer.encode(text)
   ![Alt text](img/LLM/ch01/vocabulary_with_GPT_pipeline.png)
 
 ## 二、构建注意力机制
+
+- 本章涵盖注意力机制——LLM的引擎
+
+  ![Alt text](img/LLM/ch02/engine_of_LLMs.png)
+
+  ![Alt text](img/LLM/ch02/Attention_Mechanism.png)
+
+### 2.1 长序列建模问题
+
+- 由于源语言和目标语言之间的语法结构不同，逐字翻译文本是不可行的
+
+  ![Alt text](img/LLM/ch02/word2word.png)
+
+- 在引入Transformer模型之前，Encoder-Decoder RNN通常用于机器翻译任务
+
+- 在这种设置中 Encoder使用隐藏层处理源语言中的一系列标记，以生成整个输入序列的压缩表示
+
+  ![Alt text](img/LLM/ch02/input_series.png)
+
+### 2.2 利用注意力机制捕获数据相关性
+
+- 通过注意力机制，网络的文本生成解码器能够选择性地访问所有输入token，这意味着在特定输出token的生成中，某些输入token比其他输入token具有更大的意义
+
+  ![Alt text](img/LLM/ch02/attention_tokens.png)
+
+- Transformer中的自注意力机制是一种技术，旨在通过使序列中的每个位置能够参与并确定同一序列中其他每个位置的相关性来增强输入表示
+
+  ![Alt text](img/LLM/ch02/self-attention.png)
+
+### 2.3 以self-attention的方式处理输入的不同部分
+
+#### 2.3.1 一种没有可训练权重的简单自注意力机制
+
+- 本节解释了自注意力机制的一个简化变体，它不包含任何可训练的权重
+
+- 这纯粹是为了说明，而不是transformers中使用的注意力机制
+
+- 下一节将扩展这种简单的注意力机制，以实现真正的自我注意力机制
+
+- 假设我们得到一个输入序列 $x^{(1)}$ 到 $x^{(n)}$
+
+  - 输入是一个文本（例如，像“你的旅程从第一步开始”这样的句子），它已经被转换为token embedding
+  - 例如，$x^{(1)}$ 是表示单词 “Your” 的 d维向量，依此类推
+
+- 目标：计算上下文向量 $z^{(i)}$ 对于 $x^{(1)}$ 到 $x^{(T)}$ 序列中的 $x^{(i)}$ ($x$和$z$具有相同的尺寸)
+
+  - 上下文矢量$z^{(i)}$是输入$x^{(1)}$到$x^{(T)}$序列的加权和
+
+  - 上下文向量是特定于某个输入的“上下文”
+
+    - 与其将$x^{(1)}$作为任意输入token的占位符，让我们考虑第二个输入$x^{(2)}$
+
+    - 继续一个具体的例子，而不是占位符$z^{(1)}$, 我们考虑第二输出上下文向量,$z^{(2)}$
+
+    - 第二上下文向量,$z^{(2)}$,是所有输入的加权和$x^{(1)}$到$x^{(T)}$相对于第二输入元素$x^{(2)}$加权
+
+    - 注意力权重是在计算$z^{(2)}$时确定每个输入元素对加权和的贡献程度的权重
+
+    - 简而言之，将$z^{(2)}$作为$x^{(2)}$修改版本,它还包含与手头给定任务相关的所有其他输入元素的信息
+
+      ![Alt text](img/LLM/ch02/compute_z2.png)
+
+- （请注意，此图中的数字被截断为小数点后的一位数字，以减少视觉混乱；同样，其他数字也可能包含截断值）
+
+- 按照惯例，未归一化的注意力权重被称为“注意力得分”，而归一化的注意力得分加起来为1，则被称作“注意力权重”
+
+- Step1:计算未归一化的注意力分数$w$
+
+- 假设我们使用第二个输入 token 作为查询，即$q^{(2)}$=$x^{(2)}$,我们通过点积计算未规范化的注意力得分：
+
+  - $w_{21}$=$x^{(1)}$$q^{(2)T}$
+
+  - $w_{22}$=$x^{(2)}$$q^{(2)T}$
+
+  -  $w_{23}$=$x^{(3)}$$q^{(2)T}$
+
+     - ...
+     -  $w_{2n}$=$x^{(n)}$$q^{(2)T}$
+
+- 希腊字母 $w$ 是用来象征未规范的注意力分数的
+
+  - $w_{21}$中的下标“21”意味着输入序列元素2被用作针对输入序列元素1的查询
+
+- 假设我们有以下输入句子，它已经嵌入到三维向量中（为了便于说明，我们在这里使用了一个非常小的Embedding维度，这样它就可以在没有换行的情况下Embedding到页面上）：
+
+  ```python
+  import torch
+  
+  inputs = torch.tensor(
+     [[0.43, 0.15, 0.89], # Your     (x^1)
+      [0.55, 0.87, 0.66], # journey  (x^2)
+      [0.57, 0.85, 0.64], # starts   (x^3)
+      [0.22, 0.58, 0.33], # with     (x^4)
+      [0.77, 0.25, 0.10], # one      (x^5)
+      [0.05, 0.80, 0.55]] # step     (x^6)
+  )
+  ```
+
+- 我们遵循常见的机器学习和深度学习惯例，其中训练示例表示为行，特征值表示为列；在上述张量的情况下，每行表示一个单词，每列表示一个嵌入维度
+
+- 本节的主要目的是演示上下文向量 $z^{(2)}$ 使用第二输入序列 $x^{(2)}$ 来计算,作为查询
+
+- 该图描绘了这个过程的初始步骤，包括计算$x^{(2)}$之间的注意力得分ω以及通过点积运算的所有其他输入元素
+
+  ![Alt text](img/LLM/ch02/attention_score_initial_process.png)
+
+- 我们使用输入序列元素2, $x^{(2)}$, 作为计算上下文向量的示例$z^{(2)}$; 在本节的后面,我们将把它推广到计算所有上下文向量。
+
+- 第一步是通过计算查询$x^{(2)}$之间的点积来计算未规范化的注意力得分以及所有其他输入token：
+
+  ```python
+  query = inputs[1]
+  
+  attention_scores_2 = torch.empty(inputs.shape[0])
+  
+  for i, x_i in enumerate(inputs):
+      attention_scores_2[i] = torch.dot(x_i, query)
+  
+  print(attention_scores_2)
+  ```
+
+  ```
+  tensor([0.9544, 1.4950, 1.4754, 0.8434, 0.7070, 1.0865])
+  ```
+
+  ```python
+  res = 0.
+  
+  for idx, element in enumerate(inputs[0]):
+      res += inputs[0][idx] * query[idx]
+      
+  print(res)
+  print(torch.dot(inputs[0], query))
+  ```
+
+  ```
+  tensor(0.9544)
+  tensor(0.9544)
+  ```
+
+- 步骤2：将未规范化的注意力得分标准化（“omegas”, $w$)因此它们的总和为1
+
+- 这里有一种简单的方法，可以将未规范化的注意力得分归一化为1（这是一种惯例，对解释很有用，对训练稳定性很重要）
+
+  ![Alt text](img/LLM/ch02/normalization_attention_scores.png)
+
+  ```python
+  attention_weights_2_tmp = attention_scores_2 / attention_scores_2.sum()
+  
+  print(f"Attention weights:{attention_weights_2_tmp}")
+  print(f"Sum:{attention_weights_2_tmp.sum()}")
+  ```
+
+  ```
+  Attention weights:tensor([0.1455, 0.2278, 0.2249, 0.1285, 0.1077, 0.1656])
+  Sum:1.0000001192092896
+  ```
+
+- 然而，在实践中，使用softmax函数进行归一化是常见的，也是推荐的，该函数更善于处理极值，并且在训练期间具有更理想的梯度特性。
+
+- 这里是一个用于缩放的softmax函数的简单实现，它还对向量元素进行归一化，使它们的总和为1
+
+  ```python
+  def softmax_naive(x):
+      return torch.exp(x) / torch.exp(x).sum(dim=0)
+  
+  attention_weights_2_naive = softmax_naive(attention_scores_2)
+  
+  print(f"Attention weights:{attention_weights_2_naive}")
+  print(f"Sum:{attention_weights_2_naive.sum()}")
+  ```
+
+  ```
+  Attention weights:tensor([0.1385, 0.2379, 0.2333, 0.1240, 0.1082, 0.1581])
+  Sum:1.0
+  ```
+
+- 由于上溢和下溢问题，上面的naive实现可能会遇到大小输入值的数值不稳定性问题
+
+- 因此，在实践中，建议使用softmax的PyTorch实现，该实现已针对性能进行了高度优化
+
+  ```python
+  attention_weights_2 = torch.softmax(attention_scores_2, dim=0)
+  
+  print(f"Attention weights:{attention_weights_2}")
+  print(f"Sum:{attention_weights_2.sum()}")
+  ```
+
+  ```
+  Attention weights:tensor([0.1385, 0.2379, 0.2333, 0.1240, 0.1082, 0.1581])
+  Sum:1.0
+  ```
+
+- 步骤3：计算上下文向量$z^{(2)}$通过乘以嵌入的输入 token，使用注意力权重并对结果向量$x^{(2)}$求和
+
+  ![Alt text](img/LLM/ch02/attention_tokens_sum.png)
+
+  ```python
+  query = inputs[1]
+  
+  context_vec_2 = torch.zeros(query.shape)
+  for i, x_i in enumerate(inputs):
+      context_vec_2 += attention_weights_2[i] * x_i
+      
+  print(context_vec_2)
+  ```
+
+  ```
+  tensor([0.4419, 0.6515, 0.5683])
+  ```
+
+#### 2.3.2 计算所有输入token的注意力权重
+
+- 上面，我们计算了输入2的注意力权重和上下文向量（如下图中突出显示的行所示）
+
+- 接下来，我们将此计算推广到计算所有注意力权重和上下文向量
+
+  ![Alt text](img/LLM/ch02/attention_weights_context_vectors.png)
+
+- （请注意，此图中的数字被截断为小数点后的两位数，以减少视觉混乱；每行中的值加起来应为1.0或100%；同样，其他图中的位数也被截断）
+
+- 在自我注意力中，这个过程从注意力得分的计算开始，随后对其进行归一化，以得出总共为1的注意力权重
+
+- 然后利用这些注意力权重通过输入的加权求和来生成上下文向量
+
+  ![Alt text](img/LLM/ch02/attention_compute_process.png)
+
+- 将前面的步骤1应用于所有成对元素，以计算未规范化的注意力得分矩阵
+
+  ```python
+  attention_scores = torch.empty(6, 6)
+  
+  for i, x_i in enumerate(inputs):
+      for j, x_j in enumerate(inputs):
+          attention_scores[i, j] = torch.dot(x_i, x_j)
+  
+  print(attention_scores)
+  ```
+
+  ```
+  tensor([[0.9995, 0.9544, 0.9422, 0.4753, 0.4576, 0.6310],
+          [0.9544, 1.4950, 1.4754, 0.8434, 0.7070, 1.0865],
+          [0.9422, 1.4754, 1.4570, 0.8296, 0.7154, 1.0605],
+          [0.4753, 0.8434, 0.8296, 0.4937, 0.3474, 0.6565],
+          [0.4576, 0.7070, 0.7154, 0.3474, 0.6654, 0.2935],
+          [0.6310, 1.0865, 1.0605, 0.6565, 0.2935, 0.9450]])
+  ```
+
+  ```python
+  attention_scores = inputs @ inputs.T
+  print(attention_scores)
+  ```
+
+  ```
+  tensor([[0.9995, 0.9544, 0.9422, 0.4753, 0.4576, 0.6310],
+          [0.9544, 1.4950, 1.4754, 0.8434, 0.7070, 1.0865],
+          [0.9422, 1.4754, 1.4570, 0.8296, 0.7154, 1.0605],
+          [0.4753, 0.8434, 0.8296, 0.4937, 0.3474, 0.6565],
+          [0.4576, 0.7070, 0.7154, 0.3474, 0.6654, 0.2935],
+          [0.6310, 1.0865, 1.0605, 0.6565, 0.2935, 0.9450]])
+  ```
+
+  ```python
+  attention_weights = torch.softmax(attention_scores, dim=-1)
+  print(attention_weights)
+  ```
+
+  ```
+  tensor([[0.2098, 0.2006, 0.1981, 0.1242, 0.1220, 0.1452],
+          [0.1385, 0.2379, 0.2333, 0.1240, 0.1082, 0.1581],
+          [0.1390, 0.2369, 0.2326, 0.1242, 0.1108, 0.1565],
+          [0.1435, 0.2074, 0.2046, 0.1462, 0.1263, 0.1720],
+          [0.1526, 0.1958, 0.1975, 0.1367, 0.1879, 0.1295],
+          [0.1385, 0.2184, 0.2128, 0.1420, 0.0988, 0.1896]])
+  ```
+
+  ```python
+  row_2_sum = sum([0.1385, 0.2379, 0.2333, 0.1240, 0.1082, 0.1581])
+  print("Row 2 sum:", row_2_sum)
+  print("All row sums:", attention_weights.sum(dim=-1))
+  ```
+
+  ```
+  Row 2 sum: 1.0
+  All row sums: tensor([1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000])
+  ```
+
+- 应用步骤3来计算所有上下文向量
+
+  ```python
+  all_context_vecs = attention_weights @ inputs
+  print(all_context_vecs)
+  ```
+
+  ```
+  tensor([[0.4421, 0.5931, 0.5790],
+          [0.4419, 0.6515, 0.5683],
+          [0.4431, 0.6496, 0.5671],
+          [0.4304, 0.6298, 0.5510],
+          [0.4671, 0.5910, 0.5266],
+          [0.4177, 0.6503, 0.5645]])
+  ```
+
+- 作为健全性检查，之前计算的上下文向量 $z^{(2)}$=[0.4419, 0.6515, 0.5683] 可以在上面的第二行找到
+
+  ```python
+  print("Previous 2nd context vector:", context_vec_2)
+  ```
+
+  ```
+  Previous 2nd context vector: tensor([0.4419, 0.6515, 0.5683])
+  ```
+
+### 2.4 用可训练的权重实现自我注意力机制
+
+- 一个概念框架，说明了本节中发展的自注意力机制如何融入本书和本章的整体叙事和结构
+
+  ![Alt text](img/LLM/ch02/selfattention_process.png)
+
+#### 2.4.1 逐步计算注意力权重
+
+- 在本节中，我们将实现在原始Transformer架构、GPT模型和大多数其他流行的LLM中使用的自注意机制
+
+- 这种自我注意力机制也被称为“缩放点积注意力”
+
+- 总体思路与之前类似：
+
+  - 我们希望将上下文向量计算为特定于某个输入元素的输入向量的加权和
+  - 对于以上内容，我们需要注意力权重
+
+- 正如我们看到的，与前面介绍的基本注意力机制相比，只有细微的区别：
+
+  - 最显著的区别是引入了在模型训练期间更新的权重矩阵
+  - 这些可训练的权重矩阵至关重要，因此模型（特别是模型内部的注意力模块）可以学习生成“好”的上下文向量
+
+  ![Alt text](img/LLM/ch02/self_attention_mechanism.png)
+
+- 逐步实现自我注意机制，我们将从引入三个训练权重矩阵开始,分别为$W_{q}$,$W_{k}$,$W_{v}$
+
+- 这三个矩阵用于投影Embedding的输入token，$x^{i}$，通过矩阵乘法转换为查询、键和值向量：
+
+  - query 向量: $q^{(i)}$=$W_{q}x^{(i)}$
+  - key 向量: $k^{(i)}$=$W_{k}x^{(i)}$
+  - value 向量: $v^{(i)}$=$W_{v}x^{(i)}$
+
+- 输入的嵌入维度 $x$ 和 query 向量 $q$ 可以相同也可以不同，这取决于模型的设计和具体实现
+
+- 在GPT模型中，输入和输出维度通常是相同的，但为了便于说明，为了更好地遵循计算，我们在这里选择了不同的输入和输出维度
+
+  ```python
+  x_2 = inputs[1] # second input element
+  d_in = inputs.shape[1] # the input embedding size, d=3
+  d_out = 2 # the output embedding size, d=2
+  torch.manual_seed(123)
+  W_q = torch.nn.Parameter(torch.rand(d_in, d_out), requires_grad=False)
+  W_k = torch.nn.Parameter(torch.rand(d_in, d_out), requires_grad=False)
+  W_v = torch.nn.Parameter(torch.rand(d_in, d_out), requires_grad=False)
+  ```
+
+- 接下来，我们计算查询、键和值向量
+
+  ```python
+  query_2 = x_2 @ W_q
+  key_2 = x_2 @ W_k
+  value_2 = x_2 @ W_v
+  
+  print(query_2)
+  ```
+
+  ```
+  tensor([0.4306, 1.4551])
+  ```
+
+- 如下所示，我们成功地将6个输入token从3D投影到2D嵌入空间
+
+  ```python
+  keys = inputs @ W_k
+  values = inputs @ W_v
+  
+  print(f"key.shape:{keys.shape}")
+  print(f"values.shape:{values.shape}")
+  ```
+
+  ```
+  key.shape:torch.Size([6, 2])
+  values.shape:torch.Size([6, 2])
+  ```
+
+- 在下一步，即第2步中，我们通过计算查询和每个关键向量之间的点积来计算未规范化的注意力得分
+
+  ![Alt text](img/LLM/ch02/qkv_score.png)
+
+  ```python
+  keys_2 = keys[1]
+  attention_score_22 = query_2.dot(keys_2)
+  print(attention_score_22)
+  ```
+
+  ```
+  tensor(1.8524)
+  ```
+
+- 由于我们有6个输入，因此对于给定的查询向量，我们有6种注意力得分
+
+  ```python
+  attention_scores_2 = query_2 @ keys.T
+  print(attention_scores_2)
+  ```
+
+  ```
+  tensor([1.2705, 1.8524, 1.8111, 1.0795, 0.5577, 1.5440])
+  ```
+
+  ![Alt text](img/LLM/ch02/six_attention_scores.png)
+
+- 接下来，在步骤3中，我们使用前面使用的softmax函数计算注意力权重（归一化注意力得分，总和为1）
+
+- 与之前的不同之处在于，我们现在通过将注意力分数除以嵌入维度的平方根来缩放注意力分数，$\sqrt{d_k}$
+
+  ```python
+  d_k = keys.shape[1]
+  attention_weights_2 = torch.softmax(attention_scores_2 / d_k ** 0.5, dim=-1)
+  print(attention_weights_2)
+  ```
+
+  ```
+  tensor([0.1500, 0.2264, 0.2199, 0.1311, 0.0906, 0.1820])
+  ```
+
+  ![Alt text](img/LLM/ch02/qkv_softmax.png)
+
+- 在步骤4中，我们现在计算输入查询向量2的上下文向量：
+
+  ```python
+  context_vec_2 = attention_weights_2 @ values
+  print(context_vec_2)
+  ```
+
+  ```
+  tensor([0.3061, 0.8210])
+  ```
+
+#### 2.4.2 实现一个 Self-Attention 类
+
+```python
+import torch.nn as nn
+
+class SelfAttentionV1(nn.Module):
+    def __init__(self, d_in, d_out):
+        super().__init__()
+        self.W_q = nn.Parameter(torch.rand(d_in, d_out))
+        self.W_k = nn.Parameter(torch.rand(d_in, d_out))
+        self.W_v = nn.Parameter(torch.rand(d_in, d_out))
+    
+    def forward(self, x):
+        key = x @ self.W_k
+        query = x @ self.W_q
+        value = x @ self.W_v
+        
+        attention_score = query @ key.T
+        attention_weight = torch.softmax(attention_score / key.shape[-1] ** 0.5, dim=-1)
+        
+        context_vec = attention_score @ value
+       	return context_vec
+    
+torch.manual_seed(123)
+sa_v1 = SelfAttentionV1(d_in, d_out)
+print(sa_v1(inputs))
+```
+
+```
+tensor([[0.2897, 0.8043],
+        [0.3069, 0.8188],
+        [0.3063, 0.8173],
+        [0.2972, 0.7936],
+        [0.2848, 0.7650],
+        [0.3043, 0.8105]], grad_fn=<MmBackward0>)
+```
+
+![Alt text](img/LLM/ch02/self_attention_module.png)
+
+- 我们可以使用PyTorch的线性层来简化上面的实现，如果我们禁用偏置单元，这相当于矩阵乘法
+
+- 使用nn的另一大优势，nn.Linear超过我们的手册 nn.Parameter(torch.rand(…)) 方法，是一个首选的权重初始化方案，这导致了更稳定的模型训练
+
+  ```python
+  class SelfAttention_v2(nn.Module):
+  
+      def __init__(self, d_in, d_out, qkv_bias=False):
+          super().__init__()
+          self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+  
+      def forward(self, x):
+          keys = self.W_key(x)
+          queries = self.W_query(x)
+          values = self.W_value(x)
+          
+          attn_scores = queries @ keys.T
+          attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+  
+          context_vec = attn_weights @ values
+          return context_vec
+  
+  torch.manual_seed(789)
+  sa_v2 = SelfAttention_v2(d_in, d_out)
+  print(sa_v2(inputs))
+  ```
+
+  ```
+  tensor([[-0.0739,  0.0713],
+          [-0.0748,  0.0703],
+          [-0.0749,  0.0702],
+          [-0.0760,  0.0685],
+          [-0.0763,  0.0679],
+          [-0.0754,  0.0693]], grad_fn=<MmBackward0>)
+  ```
+
+### 2.5 使用因果注意力机制隐藏之后的单词
+
+- 在因果注意力中，对角线上方的注意力权重被屏蔽，确保对于任何给定的输入，LLM在计算具有注意力权重的上下文向量时都无法利用未来的标记
+
+  ![Alt text](img/LLM/ch02/casual_attention.png)
+
+#### 2.5.1 因果掩码注意力机制的应用
+
+- 在本节中，我们将把以前的自我注意力机制转换为因果自我注意力机制
+
+- 因果自注意力确保模型对序列中某个位置的预测仅取决于先前位置的已知输出，而不是未来位置
+
+- 简单地说，这确保了每个下一个单词的预测应该只取决于前一个单词
+
+- 为了实现这一点，对于每个给定的 token，我们屏蔽掉未来的 token（输入文本中当前 token之后的token）：
+
+  ![Alt text](img/LLM/ch02/mask_attention_process.png)
+
+- 为了说明和实现因果自我注意，让我们使用上一节中的注意力得分和权重
+
+  ```python
+  query = sa_v2.W_query(inputs)
+  key = sa_v2.W_key(inputs)
+  attention_score = query @ key.T
+  
+  attention_weights = torch.softmax(attention_score / key.shape[-1] ** 0.5, dim=-1)
+  print(attention_weights)
+  ```
+
+  ```
+  tensor([[0.1921, 0.1646, 0.1652, 0.1550, 0.1721, 0.1510],
+          [0.2041, 0.1659, 0.1662, 0.1496, 0.1665, 0.1477],
+          [0.2036, 0.1659, 0.1662, 0.1498, 0.1664, 0.1480],
+          [0.1869, 0.1667, 0.1668, 0.1571, 0.1661, 0.1564],
+          [0.1830, 0.1669, 0.1670, 0.1588, 0.1658, 0.1585],
+          [0.1935, 0.1663, 0.1666, 0.1542, 0.1666, 0.1529]],
+         grad_fn=<SoftmaxBackward0>)
+  ```
+
+- 屏蔽未来注意力权重的最简单方法是通过PyTorch的tril函数创建一个掩码，其中主对角线下方（包括对角线本身）的元素设置为1，主对角线上方设置为0
+
+  ```python
+  context_length = attention_score.shape[0]
+  mask_simple = torch.tril(torch.ones(context_length, context_length))
+  print(mask_simple)
+  ```
+
+  ```
+  tensor([[1., 0., 0., 0., 0., 0.],
+          [1., 1., 0., 0., 0., 0.],
+          [1., 1., 1., 0., 0., 0.],
+          [1., 1., 1., 1., 0., 0.],
+          [1., 1., 1., 1., 1., 0.],
+          [1., 1., 1., 1., 1., 1.]])
+  ```
+
+  ```python
+  masked_simple = attention_weights * mask_simple
+  print(masked_simple)
+  ```
+
+  ```
+  tensor([[0.2899, 0.0000, 0.0000, -0.0000, 0.0000, -0.0000],
+          [0.4656, 0.1723, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.4594, 0.1703, 0.1731, 0.0000, 0.0000, 0.0000],
+          [0.2642, 0.1024, 0.1036, 0.0186, 0.0000, 0.0000],
+          [0.2183, 0.0874, 0.0882, 0.0177, 0.0786, 0.0000],
+          [0.3408, 0.1270, 0.1290, 0.0198, 0.1290, 0.0078]],
+         grad_fn=<MulBackward0>)
+  ```
+
+- 然而，如果像上面一样在softmax之后应用掩码，它将破坏softmax创建的概率分布
+
+- Softmax确保所有输出值总和为1
+
+- softmax之后的掩码将需要重新标准化输出以再次求和为1，这会使过程复杂化，并可能导致意想不到的效果
+
+- 为了确保行的总和为1，我们可以将注意力权重标准化如下：
+
+  ```python
+  row_sums = masked_simple.sum(dim=-1, keepdim=True)
+  masked_simple_norm = masked_simple / row_sums
+  print(masked_simple_norm)
+  ```
+
+  ```
+  tensor([[1.0000, 0.0000, 0.0000, -0.0000, 0.0000, -0.0000],
+          [0.7300, 0.2700, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.5723, 0.2121, 0.2156, 0.0000, 0.0000, 0.0000],
+          [0.5404, 0.2095, 0.2120, 0.0381, 0.0000, 0.0000],
+          [0.4454, 0.1782, 0.1799, 0.0361, 0.1603, 0.0000],
+          [0.4523, 0.1686, 0.1713, 0.0263, 0.1712, 0.0103]],
+         grad_fn=<DivBackward0>)
+  ```
+
+- 虽然我们现在已经从技术上完成了对因果注意机制的编码，但让我们简单地看看一种更有效的方法来实现上述目的
+
+- 因此，我们可以在对角线上方的未规范化注意力分数进入softmax函数之前，用负无穷大来掩盖它们，而不是将对角线上方的注意力权重归零并重新规范化结果：
+
+  ![Alt text](img/LLM/ch02/masked_inf_softmax.png)
+
+  ```python
+  mask = torch.triu(torch.ones(context_length, context_length), diagonal=1)
+  masked = attention_score.masked_fill(mask.bool(), -torch.inf)
+  print(masked)
+  ```
+
+  ```
+  tensor([[0.2899,   -inf,   -inf,   -inf,   -inf,   -inf],
+          [0.4656, 0.1723,   -inf,   -inf,   -inf,   -inf],
+          [0.4594, 0.1703, 0.1731,   -inf,   -inf,   -inf],
+          [0.2642, 0.1024, 0.1036, 0.0186,   -inf,   -inf],
+          [0.2183, 0.0874, 0.0882, 0.0177, 0.0786,   -inf],
+          [0.3408, 0.1270, 0.1290, 0.0198, 0.1290, 0.0078]],
+         grad_fn=<MaskedFillBackward0>)
+  ```
+
+  ```python
+  attention_weights = torch.softmax(masked / key.shape[-1] ** 0.5, dim=-1)
+  print(attention_weights)
+  ```
+
+  ```
+  tensor([[1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.5517, 0.4483, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.3800, 0.3097, 0.3103, 0.0000, 0.0000, 0.0000],
+          [0.2758, 0.2460, 0.2462, 0.2319, 0.0000, 0.0000],
+          [0.2175, 0.1983, 0.1984, 0.1888, 0.1971, 0.0000],
+          [0.1935, 0.1663, 0.1666, 0.1542, 0.1666, 0.1529]],
+         grad_fn=<SoftmaxBackward0>)
+  ```
+
+#### 2.5.2 mask注意力权重与dropout
+
+- 此外，我们还可以应用dropout来减少训练过程中的过拟合现象
+
+- Dropout可以应用在多个地方
+
+  - 例如在计算注意力权重之后
+  - 或者在注意力权重与值向量相乘之后
+
+- 在这里，我们将在计算注意力权重之后应用dropout，因为这个更加常见
+
+- 此外，在这个特定的例子中，我们使用50%的dropout率，这意味着随机屏蔽掉一半的注意力权重。（当我们稍后训练GPT模型时，我们将使用较低的dropout率，例如0.1或0.2
+
+  ![Alt text](img/LLM/ch02/masked_matrix_dropout.png)
+
+- 如果我们应用0.5（50%）的ropout率，则未丢弃的值将相应地按因子1/0.5=2进行缩放。
+
+  ```python
+  torch.manual_seed(123)
+  dropout = torch.nn.Dropout(0.5)
+  example = torch.ones(6, 6)
+  print(dropout(example))
+  ```
+
+  ```
+  tensor([[2., 2., 2., 2., 2., 2.],
+          [0., 2., 0., 0., 0., 0.],
+          [0., 0., 2., 0., 2., 0.],
+          [2., 2., 0., 0., 0., 2.],
+          [2., 0., 0., 0., 0., 2.],
+          [0., 2., 0., 0., 0., 0.]])
+  ```
+
+  ```python
+  torch.manual_seed(123)
+  print(dropout(attention_weights))
+  ```
+
+  ```
+  tensor([[2.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.0000, 0.8966, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.0000, 0.0000, 0.6206, 0.0000, 0.0000, 0.0000],
+          [0.5517, 0.4921, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.4350, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+          [0.0000, 0.3327, 0.0000, 0.0000, 0.0000, 0.0000]],
+         grad_fn=<MulBackward0>)
+  ```
+
+#### 2.5.3 实现因果自注意类
+
+- 接下来实现代码来处理由多个输入组成的批，以便我们的 CausalAttention 类支持我们实现的数据加载器产生的批输出
+
+- 为了简单起见，为了模拟这种批量输入，我们复制了输入文本示例
+
+  ```python
+  batch = torch.stack((inputs, inputs), dim=0)
+  print(batch.shape)  # torch.Size([2, 6, 3])
+  ```
+
+  ```python
+  class CasualAttention(nn.Module):
+      def __init__(self, d_in, d_out, context_length, 
+                   dropout, qkv_bias=False):
+          super().__init__()
+          self.d_out = d_out
+          self.W_q = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.W_k = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.W_v = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.dropout = nn.Dropout(dropout)
+          self.register_buffer('mask',
+       			torch.triu(torch.ones(context_length, context_length), diagonal=1)
+                              )
+        
+      def forward(self, x):
+          batch, num_tokens, d_in = x.shape
+          key = self.W_k(x)
+          query = self.W_q(x)
+          value = self.W_v(x)
+          
+          attention_score = query @ key.transpose(1, 2)
+          attention_score.masked_fill_(self.mask.bool()[:num_tokens, :num_tokens], -torch.inf)
+          attention_weights = torch.softmax(attention_score / key.shape[-1] ** 0.5, dim=-1)
+          attention_weights = self.dropout(attention_weights)
+          
+          context_vec = attention_weights @ value
+          return context_vec
+      
+  torch.manual_seed(123)
+  
+  context_length = batch.shape[1]
+  ca = CasualAttention(d_in, d_out, context_length, 0.0)
+  context_vecs = ca(batch)
+  print(context_vecs)
+  print(f"context_vecs.shape:{context_vecs.shape}")
+  ```
+
+  ```
+  tensor([[[-0.4519,  0.2216],
+           [-0.5695,  0.0343],
+           [-0.6141, -0.0377],
+           [-0.5642, -0.0717],
+           [-0.5490, -0.0906],
+           [-0.5291, -0.0961]],
+  
+          [[-0.4519,  0.2216],
+           [-0.5695,  0.0343],
+           [-0.6141, -0.0377],
+           [-0.5642, -0.0717],
+           [-0.5490, -0.0906],
+           [-0.5291, -0.0961]]], grad_fn=<CloneBackward0>)
+  context_vecs.shape:torch.Size([2, 6, 2])
+  ```
+
+- 请注意，dropout仅适用于训练期间，而不适用于推理期间
+
+  ![Alt text](img/LLM/ch02/third_step_of_transformers.png)
+
+### 2.6 将单头注意力扩展到多头注意力
+
+#### 2.6.1 堆叠多个单头注意力层
+
+- 以下是之前实现的self-attention的概况（为简单期间，未显示因果和dropout掩码）
+
+- 也被称为单头注意力
+
+  ![Alt text](img/LLM/ch02/single_head_attention.png)
+
+- 我们简单地堆叠多个单头注意力模块来获得多头注意力模块
+
+  ![Alt text](img/LLM/ch02/stack_single_head_attention.png)
+
+- 多头注意力背后的主要思想：用不同的习得的线性投影多次（并行）运行注意力机制，这允许模型联合关注来自不同位置处的表示不同子空间的信息
+
+  ```python
+  class MultiHeadAttentionWrapper(nn.Module):
+      def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
+          super().__init__()
+          self.heads = nn.ModuleList(
+              [CasualAttention(d_in, d_out, context_length, dropout, qkv_bias)
+               for _ in range(num_heads)]
+          )
+          
+      def forward(self, x):
+          return torch.cat([head(x) for head in self.heads], dim=-1)
+      
+  torch.manual_seed(123)
+  
+  context_length = batch.shape[1]
+  d_in, d_out = 3, 2
+  mha = MultiHeadAttentionWrapper(
+      d_in, d_out, context_length, 0.0, num_heads=2
+  )
+  
+  context_vecs = mha(batch)
+  
+  print(context_vecs)
+  print(f"context_vecs.shape:{context_vecs.shape}")
+  ```
+
+  ```
+  tensor([[[-0.4519,  0.2216,  0.4772,  0.1063],
+           [-0.5695,  0.0343,  0.5668,  0.2819],
+           [-0.6141, -0.0377,  0.6008,  0.3481],
+           [-0.5642, -0.0717,  0.5462,  0.3445],
+           [-0.5490, -0.0906,  0.5318,  0.3359],
+           [-0.5291, -0.0961,  0.5093,  0.3362]],
+  
+          [[-0.4519,  0.2216,  0.4772,  0.1063],
+           [-0.5695,  0.0343,  0.5668,  0.2819],
+           [-0.6141, -0.0377,  0.6008,  0.3481],
+           [-0.5642, -0.0717,  0.5462,  0.3445],
+           [-0.5490, -0.0906,  0.5318,  0.3359],
+           [-0.5291, -0.0961,  0.5093,  0.3362]]], grad_fn=<CatBackward0>)
+  context_vecs.shape:torch.Size([2, 6, 4])
+  ```
+
+- 在上面的实现中，Embedding维度是4，因为我们的d_out=2作为K、Q和V向量以及上下文向量的Embedding维度。由于我们有两个头，我们输出Embedding维度为2*2=4
+
+#### 2.6.2 通过weight拆分实现多头注意力
+
+- 虽然上面是多头注意力的直观且功能齐全的实现（包装了前面的单头注意力因果注意力实现），但我们可以编写一个名为MultiHeadAttention的独立类来实现
+
+- 我们不为这个独立的MultiHeadAttention类连接单个注意力头
+
+- 相反，我们创建单个W_query、W_key和W_value权重矩阵，然后将它们拆分为每个注意力头的单独矩阵：
+
+  ```python
+  class MultiHeadAttention(nn.Module):
+      def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
+          super().__init__()
+          assert (d_out % num_heads == 0), \
+              "d_out must be divisible by num_heads"
+          
+          self.d_out = d_out
+          self.num_heads = num_heads
+          self.head_dim = d_out // num_heads
+          
+          self.W_q = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.W_k = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.W_v = nn.Linear(d_in, d_out, bias=qkv_bias)
+          self.dropout = nn.Dropout(dropout)
+          self.register_buffer(
+              'mask', 
+              torch.triu(torch.ones(context_length, context_length), diagonal=1))
+          self.out_proj = nn.Linear(d_out, d_out)
+          
+      def forward(self, x):
+          b, num_tokens, d_in = x.shape
+          
+          key = self.W_k(x)
+          query = self.W_q(x)
+          value = self.W_v(x)
+          
+          # We implicitly split the matrix by adding a `num_heads` dimension
+          # Unroll last dim: (b, num_tokens, d_out) -> (b, num_tokens, num_heads, head_dim)
+          key = key.view(b, num_tokens, self.num_heads, self.head_dim) 
+          value = value.view(b, num_tokens, self.num_heads, self.head_dim)
+          query = query.view(b, num_tokens, self.num_heads, self.head_dim)
+          
+          # Transpose: (b, num_tokens, num_heads, head_dim) -> (b, num_heads, num_tokens, head_dim)
+          key = key.transpose(1, 2)
+          query = query.transpose(1, 2)
+          value = value.transpose(1, 2)
+          
+          attention_score = query @ key.transpose(2, 3)
+          mask_bool = self.mask.bool()[:num_tokens, :num_tokens]
+          
+          attention_score.masked_fill_(mask_bool, -torch.inf)
+          
+          attention_weights = torch.softmax(attention_score / key.shape[-1] ** 0.5, dim=-1)
+          attention_weights = self.dropout(attention_weights)
+          
+          # Shape: (b, num_tokens, num_heads, head_dim)
+          context_vec = (attention_weights @ value).transpose(1, 2) 
+          
+          # Combine heads, where self.d_out = self.num_heads * self.head_dim
+          context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
+          context_vec = self.out_proj(context_vec) # optional projection
+  
+          return context_vec
+      
+  torch.manual_seed(123)
+  
+  batch_size, context_length, d_in = batch.shape
+  d_out = 2
+  mha = MultiHeadAttention(d_in, d_out, context_length, 0.0, num_heads=2)
+  
+  context_vecs = mha(batch)
+  
+  print(context_vecs)
+  print("context_vecs.shape:", context_vecs.shape)
+  ```
+
+  ```
+  torch.Size([2, 2, 6, 1])
+  tensor([[[0.3190, 0.4858],
+           [0.2943, 0.3897],
+           [0.2856, 0.3593],
+           [0.2693, 0.3873],
+           [0.2639, 0.3928],
+           [0.2575, 0.4028]],
+  
+          [[0.3190, 0.4858],
+           [0.2943, 0.3897],
+           [0.2856, 0.3593],
+           [0.2693, 0.3873],
+           [0.2639, 0.3928],
+           [0.2575, 0.4028]]], grad_fn=<ViewBackward0>)
+  context_vecs.shape: torch.Size([2, 6, 2])
+  ```
+
+- 请注意，以上内容本质上是MultiHeadAttentionWrapper的重写版本，它更高效
+
+- 由于随机权重初始化不同，结果输出看起来有点不同，但两者都是功能齐全的实现，可以在我们将在接下来的章节中实现的GPT类中使用
+
+- 请注意，此外，我们还在上面的MultiHeadAttention类中添加了一个线性投影层（self.out_proj）。这只是一个不改变尺寸的线性变换。在LLM实现中使用这样的投影层是一种标准约定，但并非绝对必要（最近的研究表明，可以在不影响建模性能的情况下删除它）
+
+  ![Alt text](img/LLM/ch02/multihead_attention.png)
+
+- 请注意，如果您对上述内容的紧凑高效实现感兴趣，也可以考虑使用torch.nn.PyTorch中的MultiheadAttention类
+
+- 由于上面的实现乍一看可能有点复杂，让我们看看当执行attention_scores=queries@keys.transpose(2, 3)时会发生什么：
+
+  ```python
+  # (b, num_heads, num_tokens, head_dim) = (1, 2, 3, 4)
+  a = torch.tensor([[[[0.2745, 0.6584, 0.2775, 0.8573],
+                      [0.8993, 0.0390, 0.9268, 0.7388],
+                      [0.7179, 0.7058, 0.9156, 0.4340]],
+  
+                     [[0.0772, 0.3565, 0.1479, 0.5331],
+                      [0.4066, 0.2318, 0.4545, 0.9737],
+                      [0.4606, 0.5159, 0.4220, 0.5786]]]])
+  
+  print(a @ a.transpose(2, 3))
+  ```
+
+  ```
+  tensor([[[[1.3208, 1.1631, 1.2879],
+            [1.1631, 2.2150, 1.8424],
+            [1.2879, 1.8424, 2.0402]],
+  
+           [[0.4391, 0.7003, 0.5903],
+            [0.7003, 1.3737, 1.0620],
+            [0.5903, 1.0620, 0.9912]]]])
+  ```
+
+- 在这种情况下，PyTorch中的矩阵乘法实现将处理4维输入张量，以便在最后2个维度（num_tokens，head_dim）之间执行矩阵乘法，然后对各个头重复执行
+
+- 例如，以下成为单独计算每个头的矩阵乘法的更紧凑的方法：
+
+  ```python
+  first_head = a[0, 0, :, :]
+  first_res = first_head @ first_head.T
+  print("First head:\n", first_res)
+  
+  second_head = a[0, 1, :, :]
+  second_res = second_head @ second_head.T
+  print("\nSecond head:\n", second_res)
+  ```
+
+  ```
+  First head:
+   tensor([[1.3208, 1.1631, 1.2879],
+          [1.1631, 2.2150, 1.8424],
+          [1.2879, 1.8424, 2.0402]])
+  
+  Second head:
+   tensor([[0.4391, 0.7003, 0.5903],
+          [0.7003, 1.3737, 1.0620],
+          [0.5903, 1.0620, 0.9912]])
+  ```
 
 ## 三、从头实现GPT
 
