@@ -274,13 +274,13 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
 
 ![文本数据处理](img/LLM/ch01/LLM_Course_pipeline.png)
 
-### 1.1 理解word embedding
+### 1.1 理解word Embedding
 
 - 嵌入有多种形式，LLM中我们主要关注文本嵌入
 
 ![文本嵌入](img/LLM/ch01/forms_of_embedding.png)
 
-- LLM与高维空间中的 embedding 向量共同起作用
+- LLM与高维空间中的 Embedding 向量共同起作用
 - 由于我们无法可视化这样的高维空间，下图说明了一个 2维 嵌入空间
 
 ![高维空间](img/LLM/ch01/high_dimensional_space.png)
@@ -377,11 +377,11 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
 
 ### 1.3 将 tokens 转换为token IDs
 
-- 接下来，将文本 tokens 转换为 token IDs，以便于之后可以通过embedding层对其进行处理
+- 接下来，将文本 tokens 转换为 token IDs，以便于之后可以通过 Embedding 层对其进行处理
 
 ![raw_text tokenize](img/LLM/ch01/token_2_tokenID.png)
 
-- 从这些tokens，我们可以构建一个包括所有tokens的词表
+- 从这些 tokens，我们可以构建一个包括所有 tokens 的词表
 
   ```python
   # 进行去重
@@ -473,12 +473,12 @@ tensor([[ 1.3010,  1.2753, -0.2010, -0.1606, -0.4015]],
 - 其中一些特殊 tokens 是
   - **[BOS]**（序列的开始）标记文本的开始
   - **[EOS]**（序列结束）标记文本的结束位置（这通常用于连接多个不相关的文本，例如，两篇不同的维基百科文章或两本不同的书，等等）
-  - **[PAD]**（填充）如果我们训练批量大小大于1的LLM（我们可能包括多个不同长度的文本；使用填充 token，我们将较短的文本填充到最长的长度，使所有文本的长度相等）
+  - **[PAD]**（填充）如果我们训练批量大小1的LLM（我们可能包括多个不同长度的文本；使用填充 token，我们将较短的文本填充到最长的长度，使所有文本的长度相等）
   - **[UNK]** 表示未包含在词汇表中的词汇
-- 请注意，GPT-2不需要上述任何tokens，而只使用<|endoftext|> token 来降低复杂性
+- 请注意，GPT-2 不需要上述任何 tokens，而只使用 <|endoftext|> token 来降低复杂性
 - **<|endoftext|>** 类似于上面提到的 [EOS] token
-- GPT还使用 <|endoftext|> 进行填充（因为我们在对批处理输入进行训练时通常使用掩码，所以无论如何我们都不会使用填充的tokens，所以这些 tokens 是什么并不重要）
-- GPT-2不对词汇表外的单词使用 <|UNK|> 标记；相反，GPT-2 使用了一个字节对编码（BPE）标记器，它将字分解为子字单元，我们将在后面的部分中讨论
+- GPT还使用 <|endoftext|> 进行填充（因为我们在对批处理输入进行训练时通常使用掩码，所以无论如何我们都不会使用填充的 tokens，所以这些 tokens 是什么并不重要）
+- GPT-2 不对词汇表外的单词使用 <|UNK|> 标记；相反，GPT-2 使用了一个字节对编码（BPE）标记器，它将字分解为子字单元，我们将在后面的部分中讨论
 
 ![endoftext_example](img/LLM/ch01/endoftext_example.png)
 
@@ -523,7 +523,7 @@ tokenizer.encode(text)
   ('<|unk|>', 1160)
   ```
 
-- 我们还需要相应地调整tokenizer，以便于知道何时以及如何使用新的 <|UNK|> token
+- 我们还需要相应地调整 tokenizer，以便于知道何时以及如何使用新的 <|UNK|> token
 
   ```python
   class SimpleTokenizerV2:
@@ -615,7 +615,7 @@ tokenizer.encode(text)
 
 - 在本章中，我们将使用OpenAI开源tiktoken库中的BPE标记器，该库在Rust中实现其核心算法，以提高计算性能
 
-- 我创建了一个笔记本/并排比较这两种实现的bytepair_encoder（tiktoken比示例文本快5倍）
+- 我创建了一个笔记本，并排比较这两种实现的bytepair_encoder（tiktoken比示例文本快5倍）
 
   ```python
   import importlib
