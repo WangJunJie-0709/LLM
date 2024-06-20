@@ -4,4 +4,5 @@ model-ckpt.pt
 \Pretrained_models
 *.iml
 *.xml
-LLM/ch04/*.pth
+./LLM/ch04/gpt2/
+LLM/LLM/CourseLearning/ch04/gpt2/
