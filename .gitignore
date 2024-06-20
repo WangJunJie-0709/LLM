@@ -4,3 +4,4 @@ model-ckpt.pt
 \Pretrained_models
 *.iml
 *.xml
+LLM/ch04/*.pth
