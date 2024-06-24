@@ -7,3 +7,4 @@ model-ckpt.pt
 ./LLM/ch04/gpt2/
 LLM/LLM/CourseLearning/ch04/gpt2/
 *.pth
+LLM\CourseLearning\*\checkpoints\
