@@ -8,3 +8,12 @@ model-ckpt.pt
 LLM/LLM/CourseLearning/ch04/gpt2/
 *.pth
 LLM\CourseLearning\*\checkpoints\
+*.pdf
+*.zip
+*.tsv
+*.csv
+checkpoint
+*.json
+*.ckpt.*
+*.bpe
+*.safetensors
