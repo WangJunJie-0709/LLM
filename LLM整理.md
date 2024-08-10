@@ -2760,6 +2760,2840 @@ tensor([[0.2897, 0.8043],
 
 ## 四、预训练模型
 
+- 在本章中，我们实现了基本模型评估的训练循环代码，用于预训练LLM
+- 最后我们还将OpenAI中公开可用的预训练权重加载到我们的模型中
 
+![Alt text](img/LLM/ch04/pretrain.png)
+
+- 本章主题如下
+
+![Alt text](img/LLM/ch04/ch04_topic.png)
+
+### 4.1 评估生成文本模型
+
+- 我们在本节开始时简要回顾一下使用上一章中的代码初始化GPT模型
+- 然后，我们讨论LLM的基本评估指标
+- 最后，在本节中，我们将这些评估指标应用于训练和验证数据集
+
+#### 4.1.1 使用GPT生成文本
+
+- 首先初始化GPT模型
+
+  ```python
+  import torch
+  from ch04 import GPTModel
+  
+  GPT_CONFIG_124M = {
+      "vocab_size": 50257,   # Vocabulary size
+      "context_length": 256, # Shortened context length (orig: 1024)
+      "embedding_dim": 768,  # Embedding dimension
+      "n_heads": 12,         # Number of attention heads
+      "n_layers": 12,        # Number of layers
+      "drop_rate": 0.1,      # Dropout rate
+      "qkv_bias": False      # Query-key-value bias
+  }
+  
+  torch.manual_seed(123)
+  model = GPTModel(GPT_CONFIG_124M)
+  model.eval()
+  ```
+
+- 我们使用0.1以上的dropout, 但现在训练LLM而不dropout是相对常见的
+
+- 现代LLM在nn中也不使用偏置向量. query、key和value矩阵的线性层（与早期的GPT模型不同）,这是通过设置qkv_bias：False来实现的
+
+- 我们只减少了256个token的上下文长度（context_length），以减少训练模型的计算资源需求，而原始的1.24亿参数GPT-2模型使用了1024个token
+    - 这是为了让更多的读者能够在他们的笔记本电脑上遵循和执行代码示例
+    - 但是，请随时将context_length增加到1024个token（这不需要任何代码更改）
+    - 稍后，我们还将从预训练的权重中加载一个上下文长度为1024的模型
+
+- 接下来，我们使用上一章中的generate_text_simple函数来生成文本
+
+- 此外，我们定义了两个函数，text_to_token_ids和token_ids_to_text，用于在本章中使用的token和文本表示之间进行转换
+
+![Alt text](img/LLM/ch04/GPT_process.png)
+
+```python
+import tiktoken
+from ch04 import generate_text_simple
+
+def text_to_token_ids(text, tokenizer):
+    encoded = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
+    encoded_tensor = torch.tensor(encoded).unsqueeze(0)
+    return encoded_tensor
+
+def token_ids_to_text(token_ids, tokenizer):
+    flat = token_ids.squeeze(0)
+    return tokenizer.decode(flat.tolist())
+
+start_context = "Every effort moves you"
+tokenizer = tiktoken.get_encoding("gpt2")
+
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids(start_context, tokenizer),
+    max_new_tokens=10,
+    context_size=GPT_CONFIG_124M["context_length"]
+)
+
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+```
+
+```
+Output text:
+ Every effort moves you rentingetic wasnم refres RexMeCHicular stren
+```
+
+- 正如我们在上面看到的，该模型不能生成好的文本，因为它还没有经过训练
+- 我们如何测量或捕捉数字形式的“好文本”，以在训练中跟踪它？
+- 下一小节介绍了用于计算生成输出的损失度量的度量，我们可以使用该度量来衡量训练进度
+- 关于微调LLM的下一章还将介绍测量模型质量的其他方法
+
+#### 4.1.2 计算文本生成损失：交叉熵与幻觉
+
+- 假设我们有一个输入张量，其中包含2个训练示例（行）的token ID
+- 与输入相对应，目标包含我们希望模型生成的所需token ID
+- 请注意，目标是偏移1个位置的输入，如实现数据加载器时所述
+
+```python
+inputs = torch.tensor([[16833, 3626, 6100],   # ["every effort moves",
+                       [40,    1107, 588]])   #  "I really like"]
+
+targets = torch.tensor([[3626, 6100, 345  ],  # [" effort moves you",
+                        [1107,  588, 11311]]) #  " really like chocolate"]
+```
+
+- 将输入提供给模型，我们获得2个输入示例的logits向量，每个示例由3个标记组成
+- 每个标记是对应于词汇表大小的50257维向量
+- 应用softmax函数，我们可以将logits张量转化为包含概率得分的同维张量
+
+```python
+with torch.no_grad():
+    logits = model(inputs)
+    
+probas = torch.softmax(logits, dim=-1)
+print(probas.shape)
+```
+
+```
+torch.Size([2, 3, 50257])
+```
+
+- 下图使用了一个非常小的词汇进行说明，概述了我们如何将概率分数转换回文本，我们在上一章结束时对此进行了讨论
+
+![Alt text](img/LLM/ch04/loss_example.png)
+
+- 如前一章所述，我们可以应用argmax函数将概率得分转换为预测的token ID
+
+- 上面的softmax函数为每个token产生了50257维向量；argmax函数返回该向量中最高概率得分的位置，该位置是给定token的预测token ID
+
+- 由于我们有两个输入批次，每个批次有3个token，因此我们获得了2乘3的预测token ID：
+
+  ```python
+  token_ids = torch.argmax(probas, dim=-1, keepdim=True)
+  print("Token IDs:\n", token_ids)
+  ```
+
+  ```
+  Token IDs:
+   tensor([[[16657],
+           [  339],
+           [42826]],
+  
+          [[49906],
+           [29669],
+           [41751]]])
+  ```
+
+- 如果我们解码这些token，我们会发现这些token与我们希望模型预测的token（即目标token）截然不同：
+
+  ```python
+  print(f"Targets batch 1: {token_ids_to_text(targets[0], tokenizer)}")
+  print(f"Outputs batch 1: {token_ids_to_text(token_ids[0].flatten(), tokenizer)}")
+  ```
+
+  ```
+  Targets batch 1:  effort moves you
+  Outputs batch 1:  Armed heNetflix
+  ```
+
+- 那是因为模型还没有经过训练
+
+- 为了训练模型，我们需要知道它离正确的预测（目标）有多远
+
+![Alt text](img/LLM/ch04/decode_tokenid.png)
+
+- 与目标索引相对应的token概率如下：
+
+  ```python
+  text_idx = 0
+  target_probas_1 = probas[text_idx, [0, 1, 2], targets[text_idx]]
+  print(f"Text 1:{target_probas_1}")
+  
+  text_idx = 1
+  target_probas_2 = probas[text_idx, [0, 1, 2], targets[text_idx]]
+  print(f"Text 2:{target_probas_2}")
+  ```
+
+  ```
+  Text 1:tensor([7.4541e-05, 3.1061e-05, 1.1563e-05])
+  Text 2:tensor([1.0337e-05, 5.6776e-05, 4.7559e-06])
+  ```
+
+- 我们希望最大化所有这些值，使其接近1的概率
+
+- 在数学优化中，使概率得分的对数最大化比使概率得分本身最大化更容易
+
+  ```python
+  log_probas = torch.log(torch.cat((target_probas_1, target_probas_2)))
+  print(log_probas)
+  ```
+
+  ```
+  tensor([ -9.5042, -10.3796, -11.3677, -11.4798,  -9.7764, -12.2561])
+  ```
+
+- 接下来，我们计算平均对数概率
+
+  ```python
+  avg_log_probas = torch.mean(log_probas)
+  print(avg_log_probas)
+  ```
+
+  ```
+  tensor(-10.7940)
+  ```
+
+- 目标是通过优化模型权重，使该平均对数概率尽可能大
+
+- 由于日志的原因，最大可能的值是0，而我们目前距离0很远
+
+- 在深度学习中，最小化负平均对数概率值是一种标准惯例，而不是最大化平均对数概率；在我们的例子中，在深度学习中，我们将最小化10.7722，使其接近0，而不是最大化-10.7722
+
+- -10.7722的负值，即10.7722，在深度学习中也称为交叉熵损失
+
+  ```
+  neg_avg_log_probas = avg_log_probas * -1
+  print(neg_avg_log_probas)
+  ```
+
+  ```
+  tensor(10.7940)
+  ```
+
+- PyTorch已经实现了一个执行前面步骤的cross_entropy函数
+
+![Alt text](img/LLM/ch04/cross_entropy.png)
+
+- 在我们应用交叉熵函数之前，让我们检查logits和目标的形状
+
+  ```python
+  # Logits have shape (batch_size, num_tokens, vocab_size)
+  print("Logits shape:", logits.shape)
+  
+  # Targets have shape (batch_size, num_tokens)
+  print("Targets shape:", targets.shape)
+  ```
+
+  ```
+  Logits shape: torch.Size([2, 3, 50257])
+  Targets shape: torch.Size([2, 3])
+  ```
+
+- 对于PyTorch中的cross-entropy_loss函数，我们希望通过在批次维度上组合这些张量来压平这些张量：
+
+  ```python
+  logits_flat = logits.flatten(0, 1)
+  targets_flat = targets.flatten()
+  
+  print(f"Flatten logits:{logits_flat.shape}")
+  print(f"Flatten targets:{targets_flat.shape}")
+  ```
+
+  ```
+  Flatten logits:torch.Size([6, 50257])
+  Flatten targets:torch.Size([6])
+  ```
+
+- 注意，目标是token ID，它也表示我们想要最大化的logits张量中的索引位置
+
+- PyTorch中的cross_entry函数将自动负责在内部将softmax和log概率计算应用于要最大化的logits中的那些token 索引
+
+  ```python
+  import torch.nn as nn
+  import torch.nn.functional as F
+  
+  loss = F.cross_entropy(logits_flat, targets_flat)
+  print(loss)
+  ```
+
+  ```
+  tensor(10.7940)
+  ```
+
+- 一个与交叉熵损失有关的概念是LLM的困惑度
+
+- 困惑度只是交叉熵损失的指数
+
+  ```python
+  perplexity = torch.exp(loss)
+  print(perplexity)
+  ```
+
+  ```
+  tensor(48725.8203)
+  ```
+
+- 这种困惑度通常被认为更容易解释，因为它可以被理解为模型在每一步都不确定的有效词汇大小（在上面的例子中，是47678个单词或标记）
+
+- 换句话说，困惑度提供了一种衡量模型预测的概率分布与数据集中单词的实际分布匹配程度的指标
+
+- 与损失类似，较低的困惑度表明模型预测更接近实际分布
+
+#### 4.1.3 计算训练和验证集loss
+
+- 我们使用相对较小的数据集来训练LLM（事实上，只有一个小故事）
+
+- 原因是：
+    - 你可以在几分钟内在没有合适GPU的笔记本电脑上运行代码示例
+    - 培训完成得相对较快（几分钟而不是几周），这有利于教育目的
+    - 我们使用来自公共域的文本，该文本可以包含在此GitHub存储库中，而不会侵犯任何使用权限或扩大存储库大小
+
+- 例如，Llama 2 7B在A100 GPU上需要184320 GPU小时才能在2万亿token上进行训练
+
+- 在撰写本文时，AWS的8xA100云服务器的小时成本约为30美元
+
+- 因此，通过非常规计算，训练该LLM将花费184320/8*$30=690000美元
+
+- 下面，我们使用与之前数据集相同的数据集
+
+    ```python
+    import os
+    import urllib.request
+    
+    file_path = "the-verdict.txt"
+    url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt"
+    
+    if not os.path.exists(file_path):
+        with urllib.request.urlopen(url) as response:
+            text_data = response.read().decode('utf-8')
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write(text_data)
+    else:
+        with open(file_path, "r", encoding="utf-8") as file:
+            text_data = file.read()
+    ```
+
+- 通过打印前100个单词和后100个单词快速检查加载的文本是否正常
+
+    ```python
+    print(text_data[:99])
+    ```
+
+    ```
+    I HAD always thought Jack Gisburn rather a cheap genius--though a good fellow enough--so it was no 
+    ```
+
+    ```python
+    print(text_data[-99:])
+    ```
+
+    ```
+    it for me! The Strouds stand alone, and happen once--but there's no exterminating our kind of art."
+    ```
+
+    ```python
+    total_characters = len(text_data)
+    total_tokens = len(tokenizer.encode(text_data))
+    
+    print(f"Characters:{total_characters}")
+    print(f"Tokens:{total_tokens}")
+    ```
+
+    ```
+    Characters:20479
+    Tokens:5145
+    ```
+
+- 对于5145个token，文本对于训练LLM来说非常短，但同样，它是出于教育目的（我们稍后也将加载预训练的权重）
+
+- 接下来，我们将数据集划分为训练集和验证集，并使用第2章中的数据加载器为LLM训练准备批次
+
+- 出于可视化目的，下图假设max_length=6，但对于训练加载程序，我们将max_lengh设置为LLM支持的上下文长度
+
+- 为了简单起见，下图仅显示了输入token
+
+- 由于我们训练LLM来预测文本中的下一个单词，因此目标看起来与这些输入相同，只是目标移动了一个位置
+
+![Alt text](img/LLM/ch04/text_train_and_predict.png)
+
+```python
+from ch04 import create_dataloader_v1
+
+train_ratio = 0.9
+split_idx = int(train_ratio * len(text_data))
+train_data = text_data[:split_idx]
+val_data = text_data[split_idx:]
+
+torch.manual_seed(123)
+
+train_loader = create_dataloader_v1(
+    train_data,
+    batch_size=2,
+    max_length=GPT_CONFIG_124M['context_length'],
+    stride=GPT_CONFIG_124M['context_length'],
+    drop_last=True,
+    shuffle=True,
+    num_workers=0
+)
+
+val_loader = create_dataloader_v1(
+    val_data,
+    batch_size=2,
+    max_length=GPT_CONFIG_124M['context_length'],
+    stride=GPT_CONFIG_124M['context_length'],
+    drop_last=False,
+    shuffle=False,
+    num_workers=0
+)
+```
+
+```python
+if total_tokens * (train_ratio) < GPT_CONFIG_124M['context_length']:
+    print("Not enough tokens for the training loader. "
+          "Try to lower the `GPT_CONFIG_124M['context_length']` or "
+          "increase the `training_ratio`")
+
+if total_tokens * (1-train_ratio) < GPT_CONFIG_124M["context_length"]:
+    print("Not enough tokens for the validation loader. "
+          "Try to lower the `GPT_CONFIG_124M['context_length']` or "
+          "decrease the `training_ratio`")
+```
+
+- 我们使用相对较小的批量来减少计算资源需求，而且因为数据集一开始就很小
+- 例如，用1024的批量大小训练Llama 2 7B
+
+```python
+print("Train loader:")
+for x, y in train_loader:
+    print(x.shape, y.shape)
+    
+print("\nValidation loader")
+for x, y in val_loader:
+    print(x.shape, y.shape)
+```
+
+```
+Train loader:
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+torch.Size([2, 256]) torch.Size([2, 256])
+
+Validation loader
+torch.Size([2, 256]) torch.Size([2, 256])
+```
+
+- 另一项可选检查，以确保token大小在预期的大致范围内：
+
+```python
+train_tokens = 0
+for input_batch, target_batch in train_loader:
+    train_tokens += input_batch.numel()
+    
+val_tokens = 0
+for input_batch, target_batch in val_loader:
+    val_tokens += input_batch.numel()
+    
+print(f"Training tokens:{train_tokens}")
+print(f"Validation tokens:{val_tokens}")
+print(f"All tokens:{train_tokens + val_tokens}")
+```
+
+```
+Training tokens:4608
+Validation tokens:512
+All tokens:5120
+```
+
+- 接下来，我们实现一个函数来计算给定批次的交叉熵损失
+- 此外，我们实现了第二个实用程序函数来计算数据加载程序中用户指定数量的批次的损失
+
+```python
+def calc_loss_batch(input_batch, target_batch, model, device):
+    input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+    logits = model(input_batch)
+    loss = F.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
+    return loss
+
+def calc_loss_loader(data_loader, model, device, num_batches=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float('nan')
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            total_loss += loss.item()
+        else:
+            break
+    return total_loss / num_batches
+```
+
+- 如果您的机器具有支持CUDA的GPU，LLM将在GPU上进行训练，而不会对代码进行任何更改
+- 通过设备设置，我们确保数据加载到与LLM模型相同的设备上
+
+```python
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+
+torch.manual_seed(123)
+
+with torch.no_grad():
+    train_loss = calc_loss_loader(train_loader, model, device)
+    val_loss = calc_loss_loader(val_loader, model, device)
+    
+print("Training loss:", train_loss)
+print("Validation loss:", val_loss)
+```
+
+```
+Training loss: 10.98758347829183
+Validation loss: 10.98110580444336
+```
+
+![Alt text](img/LLM/ch04/3steps_of_LLM_training.png)
+
+### 4.2 LLM训练
+
+- 在本节中，我们最终实现了用于训练LLM的代码
+- 我们专注于一个简单的训练函数
+
+![Alt text](img/LLM/ch04/train_process.png)
+
+```python
+from tqdm import tqdm
+
+def train_model_simple(model, train_loader, val_loader, optimizer, device, num_epochs,
+                       eval_freq, eval_iter, start_context, tokenizer):
+    train_losses, val_losses, track_tokens_seen = [], [], []
+    tokens_seen, global_step = 0, -1
+    
+    for epoch in tqdm(range(num_epochs)):
+        model.train()
+        
+        for input_batch, target_batch in train_loader:
+            optimizer.zero_grad()
+            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            loss.backward()
+            optimizer.step()
+            tokens_seen += input_batch.numel()
+            global_step += 1
+            
+            if global_step % eval_freq == 0:
+                train_loss, val_loss = evaluate_model(
+                    model, train_loader, val_loader, device, eval_iter
+                )
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+                track_tokens_seen.append(tokens_seen)
+                print(f"Epoch:{epoch+1} (Step {global_step:06d}):"
+                      f"Train Loss {train_loss:.3f}, Val Loss {val_loss:.3f}")
+                
+        generate_and_print_sample(
+            model, tokenizer, device, start_context
+        )
+    return train_losses, val_losses, track_tokens_seen
+
+
+def evaluate_model(model, train_loader, val_loader, device, eval_iter):
+    model.eval()
+    with torch.no_grad():
+        train_loss = calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
+        val_loss = calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+    model.train()
+    return train_loss, val_loss
+
+
+def generate_and_print_sample(model, tokenizer, device, start_context):
+    model.eval()
+    context_size = model.pos_emb.weight.shape[0]
+    encoded = text_to_token_ids(start_context, tokenizer).to(device)
+    with torch.no_grad():
+        token_ids = generate_text_simple(
+            model=model, idx=encoded,
+            max_new_tokens=50, context_size=context_size
+        )
+        decoded_text = token_ids_to_text(token_ids, tokenizer)
+        print(decoded_text.replace("\n", " "))
+    model.train()
+```
+
+- 现在，让我们使用上面定义的训练函数来训练LLM：
+
+```python
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+torch.manual_seed(123)
+model = GPTModel(GPT_CONFIG_124M)
+model.to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4, weight_decay=0.1)
+
+num_epochs = 10
+train_losses, val_losses, tokens_seen = train_model_simple(
+    model, train_loader, val_loader, optimizer, device,
+    num_epochs=num_epochs, eval_freq=5, eval_iter=5,
+    start_context="Every effort moves you", tokenizer=tokenizer
+)
+```
+
+```python
+import matplotlib.pyplot as plt
+
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots(figsize=(5, 3))
+    
+    ax1.plot(epochs_seen, train_losses, label='Training Loss')
+    ax1.plot(epochs_seen, val_losses, linestyle='-.', label='Validation Loss')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss')
+    ax1.legend(loc='upper right')
+    
+    ax2 = ax1.twiny()
+    ax2.plot(tokens_seen, train_losses, alpha=0)
+    ax2.set_xlabel('Tokens seen')
+    
+    fig.tight_layout()
+    plt.show()
+    
+epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+```
+
+- 看看上面的结果，我们可以看到，该模型一开始会生成不可理解的字符串，而到最后，它能够生成语法上或多或少正确的句子
+- 然而，基于训练和验证集的损失，我们可以看到模型开始过拟合
+- 如果我们检查它最后写的几段话，我们会发现它们逐字逐句地包含在训练集中——它只是记住了训练数据
+- 稍后，我们将介绍可以在一定程度上减轻这种记忆的解码策略
+- 注意，这里出现过拟合是因为我们有一个非常非常小的训练集，并且我们对它迭代了很多次
+    - 这里的LLM训练主要用于教育目的；我们主要希望看到模型能够学习生成连贯的文本
+    - 我们没有花费数周或数月的时间在大量昂贵的硬件上训练这个模型，而是稍后加载预训练的权重
+
+![Alt text](img/LLM/ch04/train_function_of_LLM.png)
+
+
+
+### 4.3 控制随机性的解码策略
+
+- 推理相对便宜，LLM相对较小，作为我们上面训练的GPT模型，因此没有必要使用GPU来进行推理，以防您使用GPU来训练它
+- 使用我们前面在简单训练函数中使用的generate_text_simple函数（来自上一章），我们可以一次生成一个单词（或标记）的新文本
+- 下一个生成的token对应于词汇表中所有token中最大概率得分的token
+
+```python
+model.to('cpu')
+model.eval()
+
+tokenizer = tiktoken.get_encoding('gpt2')
+
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids("Every effort moves you", tokenizer),
+    max_new_tokens=25,
+    context_size=GPT_CONFIG_124M['context_length']
+)
+
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+```
+
+```
+Output text:
+ Every effort moves you?"
+
+"Yes--quite insensible to the irony. She wanted him vindicated--and by me!"
+```
+
+- 即使我们多次执行上面的generate_text_simple函数，LLM也将始终生成相同的输出
+- 现在，我们引入两个概念，即所谓的decode策略，来修改generate_text_simple：temperature缩放和top-k采样
+- 这些将允许模型控制生成文本的随机性和多样性
+
+#### 4.3.1 temperature缩放
+
+- 以前，我们总是使用torch.argmax对具有最高概率的token进行采样，作为下一个token
+- 为了增加多样性，我们可以使用torch.multinomial(probs，num_samples=1)对下一个token进行采样，从概率分布中采样
+- 这里，每个索引被选中的几率对应于其在输入张量中的概率
+- 以下是生成下一个token的简要回顾，假设用于说明的词汇非常少：
+
+```python
+vocab = { 
+    "closer": 0,
+    "every": 1, 
+    "effort": 2, 
+    "forward": 3,
+    "inches": 4,
+    "moves": 5, 
+    "pizza": 6,
+    "toward": 7,
+    "you": 8,
+} 
+
+inverse_vocab = {v: k for k, v in vocab.items()}
+
+# Suppose input is "every effort moves you", and the LLM
+# returns the following logits for the next token:
+next_token_logits = torch.tensor(
+    [4.51, 0.89, -1.90, 6.75, 1.63, -1.62, -1.89, 6.28, 1.79]
+)
+
+probas = torch.softmax(next_token_logits, dim=0)
+next_token_id = torch.argmax(probas).item()
+
+print(inverse_vocab[next_token_id])
+```
+
+```
+forward
+```
+
+```python
+torch.manual_seed(123)
+next_token_id = torch.multinomial(probas, num_samples=1).item()
+
+print(inverse_vocab[next_token_id])
+```
+
+```
+toward
+```
+
+```python
+def print_sampled_tokens(probas):
+    torch.manual_seed(123)
+    sample = [torch.multinomial(probas, num_samples=1).item() for i in range(1000)]
+    sampled_ids = torch.bincount(torch.tensor(sample))
+    for i, freq in enumerate(sampled_ids):
+        print(f"{freq} x {inverse_vocab[i]}")
+
+print_sampled_tokens(probas)
+```
+
+```
+71 x closer
+2 x every
+0 x effort
+544 x forward
+2 x inches
+1 x moves
+0 x pizza
+376 x toward
+4 x you
+```
+
+- 我们不是通过torch.argmax来确定最可能的token，而是使用torch.multinomial(probas，num_samples=1)通过从softmax分布中采样来确定最有可能的token
+- 为了便于说明，让我们看看当我们使用原始softmax概率对下一个token采样1000次时会发生什么：
+- 我们可以通过一个称为 temperature缩放 的概念来控制分布和选择过程
+- temperature缩放 只是一个花哨的词，用来将logits除以大于0的数字
+- 在应用softmax后，温度大于1将导致更均匀分布的token概率
+- 应用softmax后，小于1的温度将导致更可靠（更尖锐或更峰值）的分布
+
+```python
+def softmax_with_temperature(logits, temperature):
+    scaled_logits = logits / temperature
+    return torch.softmax(scaled_logits, dim=0)
+
+temperatures = [1, 0.1, 5]
+
+scaled_probas = [softmax_with_temperature(next_token_logits, T) for T in temperatures]
+```
+
+```python
+# Plotting
+x = torch.arange(len(vocab))
+bar_width = 0.15
+
+fig, ax = plt.subplots(figsize=(5, 3))
+for i, T in enumerate(temperatures):
+    rects = ax.bar(x + i * bar_width, scaled_probas[i], bar_width, label=f'Temperature = {T}')
+
+ax.set_ylabel('Probability')
+ax.set_xticks(x)
+ax.set_xticklabels(vocab.keys(), rotation=90)
+ax.legend()
+
+plt.tight_layout()
+plt.savefig("temperature-plot.pdf")
+plt.show()
+```
+
+- 我们可以看到，通过温度0.1的重新缩放导致更尖锐的分布，接近torch.argmax，因此几乎总是选择最有可能的单词
+
+```python
+print_sampled_tokens(scaled_probas[1])
+```
+
+```
+0 x closer
+0 x every
+0 x effort
+992 x forward
+0 x inches
+0 x moves
+0 x pizza
+8 x toward
+```
+
+```python
+print_sampled_tokens(scaled_probas[2])
+```
+
+```
+153 x closer
+68 x every
+55 x effort
+223 x forward
+102 x inches
+50 x moves
+43 x pizza
+218 x toward
+88 x you
+```
+
+- 假设LLM输入“every effort moves you”，使用上述方法有时会导致无意义的文本，例如“every effort moves you pizza”，4.3%的时间（1000次中有43次）
+
+#### 4.3.2 Top-k 采样
+
+- 为了能够使用更高的temperature来增加输出多样性并降低无意义句子的概率，我们可以将采样的标记限制为前k个最可能的标记：
+
+![Alt text](img/LLM/ch04/topk_sampling.png)
+
+- (请注意，此图中的数字被截断为小数点后的两位数，以减少视觉混乱。Softmax行中的值加起来应为1.0)
+- 在代码中，我们可以实现如下：
+
+```python
+top_k = 3
+top_logits, top_pos = torch.topk(next_token_logits, top_k)
+
+print(f"Top logits:{top_logits}")
+print(f"Top positions:{top_pos}")
+```
+
+```
+Top logits:tensor([6.7500, 6.2800, 4.5100])
+Top positions:tensor([3, 7, 0])
+```
+
+```python
+new_logits = torch.where(
+    condition=next_token_logits < top_logits[-1],
+    input=torch.tensor(float('-inf')), 
+    other=next_token_logits
+)
+
+print(new_logits)
+```
+
+```
+tensor([4.5100,   -inf,   -inf, 6.7500,   -inf,   -inf,   -inf, 6.2800,   -inf])
+```
+
+```python
+topk_probas = torch.softmax(new_logits, dim=0)
+print(topk_probas)
+```
+
+```
+tensor([0.0615, 0.0000, 0.0000, 0.5775, 0.0000, 0.0000, 0.0000, 0.3610, 0.0000])
+```
+
+#### 4.3.3 修改文本生成功能
+
+- 前面介绍了温度采样和top-k采样
+- 让我们使用这两个概念来修改我们之前用于通过LLM生成文本的generate_simple函数，创建一个新的generate函数：
+
+```python
+def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size:]
+        with torch.no_grad():
+            logits = model(idx_cond)
+        logits = logits[:, -1, :]
+        
+        if top_k is not None:
+            top_logits, _ = torch.topk(logits, top_k)
+            min_val = top_logits[:, -1]
+            logits = torch.where(logits < min_val, torch.tensor(float('-inf')).to(logits.device), logits)
+            
+        if temperature > 0.0:
+            logits = logits / temperature
+            
+            probs = torch.softmax(logits, dim=-1)
+            
+            idx_next = torch.multinomial(probs, num_samples=1)
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+            
+        if idx_next == eos_id:
+            break
+        idx = torch.cat((idx, idx_next), dim=1)
+    
+    return idx
+```
+
+```python
+torch.manual_seed(123)
+
+token_ids = generate(
+    model=model,
+    idx=text_to_token_ids("Every effort moves you", tokenizer),
+    max_new_tokens=15,
+    context_size=GPT_CONFIG_124M["context_length"],
+    top_k=25,
+    temperature=1.4
+)
+
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+```
+
+```
+Output text:
+ Every effort moves you know began to my surprise, a little it was the
+"Ah enough
+```
+
+### 4.4 PyTorch加载和保存模型权重
+
+- 训练LLM的计算成本很高，因此能够保存和加载LLM权重至关重要
+
+![Alt text](img/LLM/ch04/weight_saving.png)
+
+- PyTorch中建议的方法是通过将torch.save函数应用于.state_dict()方法来保存
+
+```python
+torch.save(model.state_dict(), 'model.pth')
+model = GPTModel(GPT_CONFIG_124M)
+model.load_state_dict(torch.load("model.pth"))
+model.eval()
+```
+
+- 使用Adam或AdamW等自适应优化器而不是常规SGD来训练LLM是很常见的
+- 这些自适应优化器为每个模型权重存储额外的参数，因此，如果我们计划稍后继续预训练，也可以保存这些参数：
+
+```python
+torch.save({
+    "model_state_dict": model.state_dict(),
+    "optimizer_state_dict": optimizer.state_dict(),
+    }, 
+    "model_and_optimizer.pth"
+)
+```
+
+```python
+checkpoint = torch.load("model_and_optimizer.pth")
+
+model = GPTModel(GPT_CONFIG_124M)
+model.load_state_dict(checkpoint["model_state_dict"])
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=0.1)
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+model.train()
+```
+
+### 4.5 从OpenAI加载预训练权重
+
+- 以前，我们只使用一本非常小的短篇小说来训练一个小的GPT-2模型，用于教育目的
+- 幸运的是，我们不必花费数万至数十万美元在大型预训练语料库上对模型进行预训练，而是可以加载OpenAI提供的预训练权重
+- 有关从Hugging Face加载权重的替代方法
+- 首先，一些样板代码从OpenAI下载文件并将权重加载到Python中
+- 由于OpenAI使用了TensorFlow，我们将不得不安装并使用TensorFlow来加载权重；tqdm是进度条库
+- 取消注释并运行下一个单元以安装所需的库
+
+```python
+from gpt_download import download_and_load_gpt2
+settings, params = download_and_load_gpt2(model_size="124M", models_dir="gpt2")
+```
+
+- 除此之外，“355M”、“774M”和“1558M”也支持model_size参数
+- 下图总结了这些不同尺寸模型之间的差异：
+
+![Alt text](img/LLM/ch04/model_size.png)
+
+- 综上，我们将124M GPT-2模型权重加载到Python中，但是我们仍然需要将它们转移到我们的GPTModel实例中
+- 首先，我们初始化一个新的GPTModel实例
+- 请注意，原始GPT模型使用偏差向量初始化了多头注意力模块中查询、键和值矩阵的线性层，这不是必需的或推荐的；然而，为了能够正确地加载权重，我们也必须通过在实现中将qkv_bias设置为True来启用这些权重
+- 我们还使用了原始GPT-2模型使用的1024 token上下文长度
+
+```python
+# Define model configurations in a dictionary for compactness
+model_configs = {
+    "gpt2-small (124M)": {"emb_dim": 768, "n_layers": 12, "n_heads": 12},
+    "gpt2-medium (355M)": {"emb_dim": 1024, "n_layers": 24, "n_heads": 16},
+    "gpt2-large (774M)": {"emb_dim": 1280, "n_layers": 36, "n_heads": 20},
+    "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},
+}
+
+# Copy the base configuration and update with specific model settings
+model_name = "gpt2-small (124M)"  # Example model name
+NEW_CONFIG = GPT_CONFIG_124M.copy()
+NEW_CONFIG.update(model_configs[model_name])
+NEW_CONFIG.update({"context_length": 1024, "qkv_bias": True})
+
+gpt = GPTModel(NEW_CONFIG)
+gpt.eval()
+```
+
+- 下一个任务是将OpenAI权重分配给GPTModel实例中相应的权重张量
+
+```python
+import numpy as np
+
+def assign(left, right):
+    if left.shape != right.shape:
+        raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
+    return nn.Parameter(torch.tensor(right))
+
+def load_weights_into_gpt(gpt, params):
+    gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params['wpe'])
+    gpt.token_emb.weight = assign(gpt.token_emb.weight, params['wte'])
+    
+    for b in range(len(params["blocks"])):
+        q_w, k_w, v_w = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["w"], 3, axis=-1)
+        gpt.transformer_blocks[b].attention.W_q.weight = assign(
+            gpt.transformer_blocks[b].attention.W_q.weight, q_w.T)
+        gpt.transformer_blocks[b].attention.W_k.weight = assign(
+            gpt.transformer_blocks[b].attention.W_k.weight, k_w.T)
+        gpt.transformer_blocks[b].attention.W_v.weight = assign(
+            gpt.transformer_blocks[b].attention.W_v.weight, v_w.T)
+
+        q_b, k_b, v_b = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["b"], 3, axis=-1)
+        gpt.transformer_blocks[b].attention.W_q.bias = assign(
+            gpt.transformer_blocks[b].attention.W_q.bias, q_b)
+        gpt.transformer_blocks[b].attention.W_k.bias = assign(
+            gpt.transformer_blocks[b].attention.W_k.bias, k_b)
+        gpt.transformer_blocks[b].attention.W_v.bias = assign(
+            gpt.transformer_blocks[b].attention.W_v.bias, v_b)
+
+        gpt.transformer_blocks[b].attention.out_proj.weight = assign(
+            gpt.transformer_blocks[b].attention.out_proj.weight, 
+            params["blocks"][b]["attn"]["c_proj"]["w"].T)
+        gpt.transformer_blocks[b].attention.out_proj.bias = assign(
+            gpt.transformer_blocks[b].attention.out_proj.bias, 
+            params["blocks"][b]["attn"]["c_proj"]["b"])
+
+        gpt.transformer_blocks[b].ffn.layers[0].weight = assign(
+            gpt.transformer_blocks[b].ffn.layers[0].weight, 
+            params["blocks"][b]["mlp"]["c_fc"]["w"].T)
+        gpt.transformer_blocks[b].ffn.layers[0].bias = assign(
+            gpt.transformer_blocks[b].ffn.layers[0].bias, 
+            params["blocks"][b]["mlp"]["c_fc"]["b"])
+        gpt.transformer_blocks[b].ffn.layers[2].weight = assign(
+            gpt.transformer_blocks[b].ffn.layers[2].weight, 
+            params["blocks"][b]["mlp"]["c_proj"]["w"].T)
+        gpt.transformer_blocks[b].ffn.layers[2].bias = assign(
+            gpt.trf_blocks[b].ffn.layers[2].bias, 
+            params["blocks"][b]["mlp"]["c_proj"]["b"])
+
+        gpt.transformer_blocks[b].norm1.scale = assign(
+            gpt.transformer_blocks[b].norm1.scale, 
+            params["blocks"][b]["ln_1"]["g"])
+        gpt.transformer_blocks[b].norm1.shift = assign(
+            gpt.transformer_blocks[b].norm1.shift, 
+            params["blocks"][b]["ln_1"]["b"])
+        gpt.transformer_blocks[b].norm2.scale = assign(
+            gpt.transformer_blocks[b].norm2.scale, 
+            params["blocks"][b]["ln_2"]["g"])
+        gpt.transformer_blocks[b].norm2.shift = assign(
+            gpt.transformer_blocks[b].norm2.shift, 
+            params["blocks"][b]["ln_2"]["b"])
+
+    gpt.final_norm.scale = assign(gpt.final_norm.scale, params["g"])
+    gpt.final_norm.shift = assign(gpt.final_norm.shift, params["b"])
+    gpt.out_head.weight = assign(gpt.out_head.weight, params["wte"])
+    
+    
+load_weights_into_gpt(gpt, params)
+gpt.to(device);
+```
+
+- 如果模型加载正确，我们可以使用之前的生成函数来生成新文本：
+
+```python
+torch.manual_seed(123)
+
+token_ids = generate(
+    model=gpt,
+    idx=text_to_token_ids("Every effort moves you", tokenizer).to(device),
+    max_new_tokens=25,
+    context_size=NEW_CONFIG["context_length"],
+    top_k=50,
+    temperature=1.5
+)
+
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+```
+
+- 我们知道我们正确地加载了模型权重，因为模型可以生成连贯的文本
 
 ## 五、微调
+
+### 5.1 文本分类微调
+
+![Alt text](img/LLM/ch05/classify_finetune.png)
+
+#### 5.1.1 不同类别的微调
+
+- 微调语言模型最常见的方法是指令微调和分类微调
+- 下面描述的指令微调是下一章的主题
+
+![Alt text](img/LLM/ch05/instruction_finetuning.png)
+
+- 如果你有机器学习的背景，本章的主题是分类微调，这是一个你可能已经熟悉的过程——例如，它类似于训练卷积网络来对手写数字进行分类
+- 在分类微调中，我们有特定数量的类标签（例如，“垃圾邮件”和“非垃圾邮件”），模型可以输出这些标签
+- 分类微调模型只能预测它在训练中看到的类（例如，“垃圾邮件”或“非垃圾邮件”），而指令微调模型通常可以执行许多任务
+- 我们可以把分类微调模型看作是一个非常专业的模型；在实践中，创建一个专门的模型要比创建一个在许多不同任务上表现良好的多面手模型容易得多
+
+![Alt text](img/LLM/ch05/classify_finetuning.png)
+
+#### 5.1.2 数据集准备
+
+![Alt text](img/LLM/ch05/stage1_classify_finetune.png)
+
+- 本节准备用于分类微调的数据集
+- 我们使用由垃圾邮件和非垃圾邮件组成的数据集来微调LLM以对其进行分类
+- 首先，我们下载并解压缩数据集
+
+```python
+import urllib.request
+import zipfile
+import os
+from pathlib import Path
+
+url = "https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip"
+zip_path = "sms_spam_collection.zip"
+extracted_path = "sms_spam_collection"
+data_file_path = Path(extracted_path) / "SMSSpamCollection.tsv"
+
+def download_and_unzip_spam_data(url, zip_path, extracted_path, data_file_path):
+    if data_file_path.exists():
+        print(f"{data_file_path} already exists. Skipping download and extraction.")
+        return
+
+    # Downloading the file
+    with urllib.request.urlopen(url) as response:
+        with open(zip_path, "wb") as out_file:
+            out_file.write(response.read())
+
+    # Unzipping the file
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        zip_ref.extractall(extracted_path)
+
+    # Add .tsv file extension
+    original_file_path = Path(extracted_path) / "SMSSpamCollection"
+    os.rename(original_file_path, data_file_path)
+    print(f"File downloaded and saved as {data_file_path}")
+
+download_and_unzip_spam_data(url, zip_path, extracted_path, data_file_path)
+```
+
+- 数据集被保存为一个以制表符分隔的文本文件，我们可以将其加载到Panda DataFrame中
+
+```python
+import pandas as pd
+
+df = pd.read_csv(data_file_path, sep="\t", header=None, names=["Label", "Text"])
+```
+
+- 当我们检查类分布时，我们发现数据中包含“ham”（即“非垃圾邮件”）的频率远高于“垃圾邮件”
+
+```python
+print(df["Label"].value_counts())
+```
+
+```
+Label
+ham     4825
+spam     747
+Name: count, dtype: int64
+```
+
+- 为了简单起见，而且因为出于教育目的，我们更喜欢小的数据集（这将使更快地微调LLM成为可能），我们对数据集进行了子采样（欠采样），使其包含每个类的747个实例
+
+```python
+def create_balanced_dataset(df):
+    num_spam = df[df["Label"] == "spam"].shape[0]
+    
+    ham_subset = df[df["Label"] == "ham"].sample(num_spam, random_state=123)
+    
+    balanced_df = pd.concat([ham_subset, df[df["Label"] == "spam"]])
+    return balanced_df
+
+balanced_df = create_balanced_dataset(df)
+print(balanced_df["Label"].value_counts())
+```
+
+```
+Label
+ham     747
+spam    747
+Name: count, dtype: int64
+```
+
+```python
+balanced_df["Label"] = balanced_df["Label"].map({"ham": 0, "spam": 1})
+```
+
+- 现在，让我们定义一个函数，将数据集随机划分为训练、验证和测试集
+
+```python
+def random_split(df, train_frac, validation_frac):
+    df = df.sample(frac=1, random_state=123).reset_index(drop=True)
+    
+    train_end = int(len(df) * train_frac)
+    validation_end = train_end + int(len(df) * validation_frac)
+    
+    train_df = df[:train_end]
+    validation_df = df[train_end:validation_end]
+    test_df = df[validation_end:]
+    
+    return train_df, validation_df, test_df
+
+train_df, validation_df, test_df = random_split(balanced_df, 0.7, 0.1)
+
+train_df.to_csv("train.csv", index=None)
+validation_df.to_csv("validation.csv", index=None)
+test_df.to_csv("test.csv", index=None)
+```
+
+#### 5.1.3 创建数据加载程序
+
+- 请注意，文本消息具有不同的长度；如果我们想在一批中组合多个训练示例，我们必须
+    - 将所有消息截断为数据集中或批处理中最短消息的长度
+    - 将所有消息填充到数据集中或批处理中最长消息的长度
+- 我们选择选项2，并将所有消息填充到数据集中最长的消息中
+- 为此，我们使用<|endoftext|>作为填充标记
+
+![Alt text](img/LLM/ch05/token_padding.png)
+
+```python
+import tiktoken
+
+tokenizer = tiktoken.get_encoding("gpt2")
+print(tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"}))
+```
+
+```
+[50256]
+```
+
+- 下面的SpamDataset类标识训练数据集中最长的序列，并将填充标记添加到其他序列以匹配该序列长度
+
+```python
+import torch
+from torch.utils.data import Dataset
+
+class SpamDataset(Dataset):
+    def __init__(self, csv_file, tokenizer, max_length=None, pad_token_id=50256):
+        self.data = pd.read_csv(csv_file)
+        
+        self.encoded_texts = [
+            tokenizer.encode(text) for text in self.data["Text"]
+        ]
+        
+        if max_length is None:
+            self.max_length = self._longest_encoded_length()
+        else:
+            self.max_length = max_length
+            self.encoded_texts = [
+                encoded_text[:self.max_length]
+                for encoded_text in self.encoded_texts
+            ]
+            
+        self.encoded_texts = [
+            encoded_text + [pad_token_id] * (self.max_length - len(encoded_text))
+            for encoded_text in self.encoded_texts
+        ]
+      
+    def __getitem__(self, index):
+        encoded = self.encoded_texts[index]
+        label = self.data.iloc[index]["Label"]
+        return (
+            torch.tensor(encoded, dtype=torch.long),
+            torch.tensor(label, dtype=torch.long)
+        )
+      
+    def __len__(self):
+        return len(self.data)
+    
+    def _longest_encoded_length(self):
+        max_length = 0
+        for encoded_text in self.encoded_texts:
+            encode_length = len(encoded_text)
+            if encode_length > max_length:
+                max_length = encode_length
+        return max_length
+```
+
+```python
+train_dataset = SpamDataset(
+    csv_file="train.csv",
+    max_length=None,
+    tokenizer=tokenizer
+)
+
+print(train_dataset.max_length)
+```
+
+```
+120
+```
+
+- 我们还将验证和测试集添加到最长的训练序列中
+- 请注意，比最长训练示例更长的验证和测试集样本将通过SpamDataset代码中的encode_text[：self.max_length]截断
+- 这种行为是完全可选的，如果我们在验证和测试集的情况下都将max_length设置为None，它也会很好地工作
+
+```python
+val_dataset = SpamDataset(
+    csv_file="validation.csv",
+    max_length=None,
+    tokenizer=tokenizer
+)
+test_dataset = SpamDataset(
+    csv_file="test.csv",
+    max_length=None,
+    tokenizer=tokenizer
+)
+```
+
+- 接下来，我们使用数据集实例化数据加载程序，这与前几章中创建数据加载程序类似
+
+
+![Alt text](img/LLM/ch05/dataloader.png)
+
+```python
+from torch.utils.data import DataLoader
+
+num_workers = 0
+batch_size = 8
+
+torch.manual_seed(123)
+
+train_loader = DataLoader(
+    dataset=train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=num_workers,
+    drop_last=True
+)
+
+val_loader = DataLoader(
+    dataset=val_dataset,
+    batch_size=batch_size,
+    num_workers=num_workers,
+    drop_last=False
+)
+
+test_loader = DataLoader(
+    dataset=test_dataset,
+    batch_size=batch_size,
+    num_workers=num_workers,
+    drop_last=False
+)
+```
+
+- 作为验证步骤，我们对数据加载程序进行迭代，并确保批次中每个包含8个训练示例，其中每个训练示例由120个token组成
+
+```python
+print("Train loader:")
+for input_batch, target_batch in train_loader:
+    pass
+
+print("Input batch dimensions:", input_batch.shape)
+print("Label batch dimensions:", target_batch.shape)
+```
+
+```
+Train loader:
+Input batch dimensions: torch.Size([8, 120])
+Label batch dimensions: torch.Size([8])
+```
+
+- 最后，让我们打印每个数据集中的批次总数
+
+```python
+print(f"{len(train_loader)} training batches")
+print(f"{len(val_loader)} validation batches")
+print(f"{len(test_loader)} test batches")
+```
+
+```
+130 training batches
+19 validation batches
+38 test batches
+```
+
+#### 5.1.4 使用预先训练的权重初始化模型
+
+- 在本节中，我们初始化上一章中使用的预训练模型
+
+```python
+CHOOSE_MODEL = "gpt2-small (124M)"
+INPUT_PROMPT = "Every effort moves"
+
+BASE_CONFIG = {
+    "vocab_size": 50257,
+    "context_length": 1024,
+    "drop_rate": 0.0,
+    "qkv_bias": True
+}
+
+model_configs = {
+    "gpt2-small (124M)": {"embedding_dim": 768, "n_layers": 12, "n_heads": 12},
+    "gpt2-medium (355M)": {"embedding_dim": 1024, "n_layers": 24, "n_heads": 16},
+    "gpt2-large (774M)": {"embedding_dim": 1280, "n_layers": 36, "n_heads": 20},
+    "gpt2-xl (1558M)": {"embedding_dim": 1600, "n_layers": 48, "n_heads": 25},
+}
+
+BASE_CONFIG.update(model_configs[CHOOSE_MODEL])
+
+assert train_dataset.max_length <= BASE_CONFIG["context_length"], (
+    f"Dataset length {train_dataset.max_length} exceeds model's context "
+    f"length {BASE_CONFIG['context_length']}. Reinitialize data sets with "
+    f"`max_length={BASE_CONFIG['context_length']}`"
+)
+```
+
+```python
+from gpt_download import download_and_load_gpt2
+from ch05 import GPTModel, load_weights_into_gpt
+
+model_size = CHOOSE_MODEL.split(" ")[-1].lstrip("(").rstrip(")")
+settings, params = download_and_load_gpt2(model_size, "gpt2")
+
+model = GPTModel(BASE_CONFIG)
+load_weights_into_gpt(model, params)
+model.eval()
+```
+
+- 为了确保模型被正确加载，让我们仔细检查一下它是否生成了连贯的文本
+
+```python
+from ch05 import generate_text_simple, text_to_token_ids, token_ids_to_text
+
+text1 = "Every effort moves you"
+
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids(text1, tokenizer),
+    max_new_tokens=15,
+    context_size=BASE_CONFIG["context_length"]
+)
+
+print(token_ids_to_text(token_ids, tokenizer))
+```
+
+```
+Every effort moves you forward.
+
+The first step is to understand the importance of your work
+```
+
+- 在我们将模型作为分类器进行微调之前，让我们看看该模型是否已经可以通过提示对垃圾邮件进行分类
+
+```python
+text2 = (
+    "Is the following text 'spam'? Answer with 'yes' or 'no':"
+    " 'You are a winner you have been specially"
+    " selected to receive $1000 cash or a $2000 award.'"
+)
+
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids(text2, tokenizer),
+    max_new_tokens=23,
+    context_size=BASE_CONFIG['context_length']
+)
+
+print(token_ids_to_text(token_ids, tokenizer))
+```
+
+```
+Is the following text 'spam'? Answer with 'yes' or 'no': 'You are a winner you have been specially selected to receive $1000 cash or a $2000 award.'
+
+The following text 'spam'? Answer with 'yes' or 'no': 'You are a winner
+```
+
+- 正如我们所看到的，该模型在以下说明方面不是很好
+- 这是意料之中的事，因为它只是经过了预训练，而不是指令微调（指令微调将在下一章中介绍）
+
+#### 5.1.5 添加分类head
+
+![Alt text](img/LLM/ch05/classify_head.png)
+
+- 在本节中，我们将修改预训练的LLM，使其为分类微调做好准备
+
+- 目标是替换和微调输出层
+- 为了实现这一点，我们首先冻结模型，这意味着我们使所有层都不可训练
+
+```python
+for param in model.parameters():
+    param.requires_grad = False
+```
+
+- 然后，我们替换输出层（model.out_head），它最初将层输入映射到50257个维度（词汇表的大小）
+- 由于我们对二进制分类的模型进行了微调（预测了两个类，“垃圾邮件”和“非垃圾邮件”），我们可以替换输出层，如下所示，默认情况下可以进行训练
+- 请注意，我们使用BASE_CONFIG[“emb_dim”]（在“gpt2 small（124M）”模型中等于768）来保持下面的代码更通用
+
+```python
+torch.manual_seed(123)
+
+num_classes = 2
+model.out_head = torch.nn.Linear(in_features=BASE_CONFIG["embedding_dim"], out_features=num_classes)
+```
+
+- 从技术上讲，只训练输出层就足够了
+- 然而，正如我在微调大型语言模型中发现的那样，实验表明微调附加层可以显著提高性能
+- 因此，我们还使最后一个Transformer块和将最后一个Transformer块连接到输出层的最后一个LayerNorm模块可训练
+
+![Alt text](img/LLM/ch05/finetune_architecture.png)
+
+```python
+for param in model.transformer_blocks[-1].parameters():
+    param.requires_grad = True
+    
+for param in model.final_norm.parameters():
+    param.requires_grad = True
+```
+
+- 我们仍然可以使用与前几章中类似的模型
+- 例如，让我们给它一些文本输入
+
+```python
+inputs = tokenizer.encode("Do you have time")
+inputs = torch.tensor(inputs).unsqueeze(0)
+print("Inputs:", inputs)
+print("Inputs dimensions:", inputs.shape)
+```
+
+```
+Inputs: tensor([[5211,  345,  423,  640]])
+Inputs dimensions: torch.Size([1, 4])
+```
+
+- 与前几章不同的是，它现在有两个输出维度，而不是50257
+
+```python
+with torch.no_grad():
+    outputs = model(inputs)
+    
+print("Outputs:\n", outputs)
+print("Outputs dimensions:", outputs.shape)
+```
+
+```
+Outputs:
+ tensor([[[-1.5854,  0.9904],
+         [-3.7235,  7.4548],
+         [-2.2661,  6.6049],
+         [-3.5983,  3.9902]]])
+Outputs dimensions: torch.Size([1, 4, 2])
+```
+
+- 如前几章所述，对于每个输入token，都有一个输出向量
+- 由于我们向模型提供了一个具有4个输入标记的文本样本，因此输出由上面的4个二维输出向量组成
+
+![Alt text](img/LLM/ch05/finetune_architecture_example.png)
+
+- 在第2章中，我们讨论了注意力机制，它将每个输入token连接到另一个输入token
+- 在第2章中，我们还介绍了在类GPT模型中使用的因果注意掩码；该因果掩码使当前token只关注当前和以前的token位置
+- 基于这种因果注意机制，第四个（最后一个）token 包含了所有token中最多的信息，因为它是唯一包含所有其他token信息的token
+- 因此，我们对最后一个token特别感兴趣，我们将为垃圾邮件分类任务对其进行微调
+
+```python
+print("Last output token:", outputs[:, -1, :])
+```
+
+```
+Last output token: tensor([[-3.5983,  3.9902]])
+```
+
+![Alt text](img/LLM/ch05/casual_attention_mask.png)
+
+#### 5.1.6 计算分类损失和准确率
+
+![Alt text](img/LLM/ch05/process_loss_accuracy.png)
+
+- 在解释损失计算之前，让我们简要了解一下模型输出是如何转换为类标签的
+
+![Alt text](img/LLM/ch05/output_to_class_label.png)
+
+```python
+print("Last output token:", outputs[:, -1, :])
+```
+
+```
+Last output token: tensor([[-3.5983,  3.9902]])
+```
+
+- 与第4章类似，我们通过softmax函数将输出（logits）转换为概率得分，然后通过argmax函数获得最大概率值的索引位置
+
+```python
+probas = torch.softmax(outputs[:, -1, :], dim=-1)
+label = torch.argmax(probas)
+print("Class label", label.item())
+```
+
+```
+Class label 1
+```
+
+- 请注意，如第4章所述，softmax函数在这里是可选的，因为最大的输出对应于最大的概率分数
+
+```python
+logits = outputs[:, -1, :]
+label = torch.argmax(logits)
+print("Class label", label.item())
+```
+
+```
+Class label 1
+```
+
+- 我们可以将这一概念应用于计算所谓的分类精度，即计算给定数据集中正确预测的百分比
+- 为了计算分类精度，我们可以将前面基于argmax的预测代码应用于数据集中的所有示例，并计算正确预测的分数，如下所示：
+
+```python
+def calc_accuracy_loader(data_loader, model, device, num_batches=None):
+    model.eval()
+    correct_predictions, num_examples = 0, 0
+    
+    if num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+            
+            with torch.no_grad():
+                logits = model(input_batch)[:, -1, :]
+            predicted_labels = torch.argmax(logits, dim=-1)
+            
+            num_examples += predicted_labels.shape[0]
+            correct_predictions += (predicted_labels == target_batch).sum().item()
+        else:
+            break
+    return correct_predictions / num_examples
+```
+
+- 让我们应用该函数来计算不同数据集的分类精度
+
+```python
+device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
+model.to(device)
+
+torch.manual_seed(123)
+
+train_accuracy = calc_accuracy_loader(train_loader, model, device, num_batches=10)
+val_accuracy = calc_accuracy_loader(val_loader, model, device, num_batches=10)
+test_accuracy = calc_accuracy_loader(test_loader, model, device, num_batches=10)
+
+print(f"Training accuracy: {train_accuracy*100:.2f}%")
+print(f"Validation accuracy: {val_accuracy*100:.2f}%")
+print(f"Test accuracy: {test_accuracy*100:.2f}%")
+```
+
+```
+Training accuracy: 46.25%
+Validation accuracy: 45.00%
+Test accuracy: 48.75%
+```
+
+- 正如我们所看到的，预测精度不是很好，因为我们还没有微调模型
+- 在我们开始微调（/训练）之前，我们首先必须定义训练期间要优化的损失函数
+
+- 目标是最大限度地提高垃圾邮件分类模型的准确性；然而，分类精度不是一个可微函数
+
+- 因此，相反，我们将交叉熵损失最小化，作为最大化分类精度的代理（您可以在我免费提供的深度学习导论课程的第8讲中了解更多关于此主题的信息）
+
+- 这里的calc_loss_batch函数与第5章中的相同，只是我们只对优化最后一个token模型 (input_batch) [：，-1，：]而不是所有token模型 (input_batch)
+
+```python
+def calc_loss_batch(input_batch, target_batch, model, device):
+    input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+    logits = model(input_batch)[:, -1, :]
+    loss = torch.nn.functional.cross_entropy(logits, target_batch)
+    return loss
+    
+def calc_loss_loader(data_loader, model, device, num_batches=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        # Reduce the number of batches to match the total number of batches in the data loader
+        # if num_batches exceeds the number of batches in the data loader
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            total_loss += loss.item()
+        else:
+            break
+    return total_loss / num_batches
+```
+
+```python
+with torch.no_grad(): # Disable gradient tracking for efficiency because we are not training, yet
+    train_loss = calc_loss_loader(train_loader, model, device, num_batches=5)
+    val_loss = calc_loss_loader(val_loader, model, device, num_batches=5)
+    test_loss = calc_loss_loader(test_loader, model, device, num_batches=5)
+
+print(f"Training loss: {train_loss:.3f}")
+print(f"Validation loss: {val_loss:.3f}")
+print(f"Test loss: {test_loss:.3f}")
+```
+
+```
+Training loss: 2.453
+Validation loss: 2.525
+Test loss: 2.413
+```
+
+#### 5.1.7 使用有监督数据微调模型
+
+- 在本节中，我们定义并使用训练函数来提高模型的分类精度
+- 下面的train_classifier_sample函数实际上与我们在第5章中用于预训练模型的train_model_simple函数相同
+- 唯一的两个区别是我们现在
+    - 跟踪看到的训练示例数（examples_seen），而不是看到的示例数
+    - 计算每个epoch之后的精度，而不是在每个epoch后打印示例文本
+
+![Alt text](img/LLM/ch05/output_to_class_label.png)
+
+```python
+def evaluate_model(model, train_loader, val_loader, device, eval_iter):
+    model.eval()
+    with torch.no_grad():
+        train_loss = calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
+        val_loss = calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+    model.train()
+    return train_loss, val_loss
+```
+
+```python
+from tqdm import tqdm
+
+def train_classifier_simple(model, train_loader, val_loader, optimizer, device, num_epochs, eval_freq, eval_iter):
+    train_losses, val_losses, train_accs, val_accs = [], [], [], []
+    example_seen, global_step = 0, -1
+    
+    for epoch in tqdm(range(num_epochs)):
+        model.train()
+        
+        for input_batch, target_batch in train_loader:
+            optimizer.zero_grad()
+            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            loss.backward()
+            optimizer.step()
+            example_seen += input_batch.shape[0]
+            global_step += 1
+            
+            if global_step % eval_freq == 0:
+                train_loss, val_loss = evaluate_model(model, train_loader, val_loader, device, eval_iter)
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+                print(f"Ep {epoch+1} (Step {global_step:06d}): "
+                      f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}")
+                
+        train_accuracy = calc_accuracy_loader(train_loader, model, device, num_batches=eval_iter)
+        val_accuracy = calc_accuracy_loader(val_loader, model, device, num_batches=eval_iter)
+        print(f"Training accuracy: {train_accuracy*100:.2f}% | ", end="")
+        print(f"Validation accuracy: {val_accuracy*100:.2f}%")
+        train_accs.append(train_accuracy)
+        val_accs.append(val_accuracy)
+    return train_losses, val_losses, train_accs, val_accs, example_seen
+```
+
+```python
+import time
+
+start_time = time.time()
+
+torch.manual_seed(123)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.1)
+
+num_epochs = 2
+train_losses, val_losses, train_accs, val_accs, examples_seen = train_classifier_simple(
+    model, train_loader, val_loader, optimizer, device, num_epochs=num_epochs, 
+    eval_freq=50, eval_iter=5
+)
+
+end_time = time.time()
+execution_time_minutes = (end_time - start_time) / 60
+print(f"Train completed in {execution_time_minutes:.2f} minutes.")
+```
+
+- 我们可以计算完整数据集的训练、验证和测试集性能，如下所示
+
+```python
+train_accuracy = calc_accuracy_loader(train_loader, model, device)
+val_accuracy = calc_accuracy_loader(val_loader, model, device)
+test_accuracy = calc_accuracy_loader(test_loader, model, device)
+
+print(f"Training accuracy: {train_accuracy*100:.2f}%")
+print(f"Validation accuracy: {val_accuracy*100:.2f}%")
+print(f"Test accuracy: {test_accuracy*100:.2f}%")
+```
+
+```
+Training accuracy: 84.52%
+Validation accuracy: 73.83%
+Test accuracy: 83.00%
+```
+
+- 我们可以看到，训练集和验证集的性能实际上是相同的
+- 然而，基于略低的测试集性能，我们可以看到，该模型在很小的程度上过度拟合了训练数据，以及用于调整一些超参数的验证数据，如学习率
+- 然而，这是正常的，通过增加模型的丢弃率（drop_rate）或优化器设置中的weight_decay，这种差距可能会进一步缩小
+
+#### 5.1.8 使用LLM作为垃圾邮件分类器
+
+![Alt text](img/LLM/ch05/finetuned_model_to_test.png)
+
+- 最后，让我们使用经过微调的GPT模型
+- 下面的classification_preview函数实现了与我们前面实现的SpamDataset类似的数据预处理步骤
+- 然后，函数从模型中返回预测的整数类标签，并返回相应的类名
+
+```python
+def classify_review(text, model, tokenizer, device, max_length=None, pad_token_id=50256):
+    model.eval()
+
+    # Prepare inputs to the model
+    input_ids = tokenizer.encode(text)
+    supported_context_length = model.pos_emb.weight.shape[1]
+
+    # Truncate sequences if they too long
+    input_ids = input_ids[:min(max_length, supported_context_length)]
+
+    # Pad sequences to the longest sequence
+    input_ids += [pad_token_id] * (max_length - len(input_ids))
+    input_tensor = torch.tensor(input_ids, device=device).unsqueeze(0) # add batch dimension
+
+    # Model inference
+    with torch.no_grad():
+        logits = model(input_tensor)[:, -1, :]  # Logits of the last output token
+    predicted_label = torch.argmax(logits, dim=-1).item()
+
+    # Return the classified result
+    return "spam" if predicted_label == 1 else "not spam"
+```
+
+```python
+text_1 = (
+    "You are a winner you have been specially"
+    " selected to receive $1000 cash or a $2000 award."
+)
+
+print(classify_review(
+    text_1, model, tokenizer, device, max_length=train_dataset.max_length
+))
+```
+
+```
+not spam
+```
+
+```python
+text_2 = (
+    "Hey, just wanted to check if we're still on"
+    " for dinner tonight? Let me know!"
+)
+
+print(classify_review(
+    text_2, model, tokenizer, device, max_length=train_dataset.max_length
+))
+```
+
+```
+not spam
+```
+
+```python
+torch.save(model.state_dict(), "review_classifier.pth")
+model_state_dict = torch.load("review_classifier.pth")
+model.load_state_dict(model_state_dict)
+```
+
+### 5.2 指令微调
+
+![Alt text](img/LLM/ch06/work_flow_finetune.png)
+
+#### 5.2.1 指令微调简介
+
+- 在之前，我们看到LLM的预训练包括一个训练过程，在这个过程中，LLM一次学习生成一个单词
+- 因此，经过预训练的LLM擅长文本完成，但不擅长遵循指令
+- 在本章中，我们教LLM更好地遵循说明
+
+![Alt text](img/LLM/ch06/instruction_finetune.png)
+
+- 本章所涵盖的主题总结如下图所示
+
+![Alt text](img/LLM/ch06/topic_summary.png)
+
+#### 5.2.2 有监督指令微调数据集准备
+
+```python
+import json
+import os
+import urllib
+
+def download_and_load_file(file_path, url):
+    if not os.path.exists(file_path):
+        with urllib.request.urlopen(url) as response:
+            text_data = response.read().decode("utf-8")
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write(text_data)
+    else:
+        with open(file_path, "r", encoding="utf-8") as file:
+            text_data = file.read()
+    
+    with open(file_path, "r") as file:
+        data = json.load(file)
+    
+    return data
+
+
+file_path = "instruction-data.json"
+url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch07/01_main-chapter-code/instruction-data.json"
+
+data = download_and_load_file(file_path, url)
+print("Number of entries:", len(data))
+```
+
+```
+Number of entries: 1100
+```
+
+- 我们从上面的JSON文件加载的数据列表中的每个项都是以下形式的字典
+
+```python
+print("Example entry:\n", data[50])
+```
+
+```
+Example entry:
+ {'instruction': 'Identify the correct spelling of the following word.', 'input': 'Ocassion', 'output': "The correct spelling is 'Occasion.'"}
+```
+
+- 请注意，“input”字段可以为空：
+
+```python
+print("Another example entry:\n", data[999])
+```
+
+```
+Another example entry:
+ {'instruction': "What is an antonym of 'complicated'?", 'input': '', 'output': "An antonym of 'complicated' is 'simple'."}
+```
+
+- 指令微调通常被称为“监督指令微调”，因为它涉及在明确提供输入输出对的数据集上训练模型
+- 有不同的方式将条目格式化为LLM的输入；下图展示了用于训练Alpaca和Phi-3的两种示例格式
+
+![Alt text](img/LLM/ch06/train_example.png)
+
+- 在本章中，我们使用Alpaca风格的提示格式，这是用于指令微调的原始提示模板
+- 下面，我们格式化将作为LLM的输入传递的输入
+
+```python
+def format_input(entry):
+    instruction_text = (
+        f"Below is an instruction that describes a task. "
+        f"Write a response that appropriately completes the request."
+        f"\n\n### Instruction:\n{entry['instruction']}"
+    )
+
+    input_text = f"\n\n### Input:\n{entry['input']}" if entry["input"] else ""
+
+    return instruction_text + input_text
+```
+
+- 带有输入字段的格式化响应如下所示
+
+```python
+model_input = format_input(data[50])
+desired_response = f"\n\n### Response:\n{data[50]['output']}"
+
+print(model_input + desired_response)
+```
+
+```
+Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+Identify the correct spelling of the following word.
+
+### Input:
+Ocassion
+
+### Response:
+The correct spelling is 'Occasion.'
+```
+
+- 下面是一个没有输入字段的格式化响应
+
+```python
+model_input = format_input(data[999])
+desired_response = f"\n\n### Response:\n{data[999]['output']}"
+
+print(model_input + desired_response)
+```
+
+```
+Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+What is an antonym of 'complicated'?
+
+### Response:
+An antonym of 'complicated' is 'simple'.
+```
+
+- 我们将数据集划分为训练集、验证集和测试集
+
+```python
+train_portion = int(len(data) * 0.85)
+test_portion = int(len(data) * 0.1)
+val_portion = len(data) - train_portion - test_portion
+
+train_data = data[:train_portion]
+test_data = data[train_portion:train_portion+test_portion]
+val_data = data[train_portion+test_portion:]
+
+print("Training set length:", len(train_data))
+print("Validation set length:", len(val_data))
+print("Test set length:", len(test_data))
+```
+
+```
+Training set length: 935
+Validation set length: 55
+Test set length: 110
+```
+
+#### 5.2.3 将数据组织成训练批次
+
+![Alt text](img/LLM/ch06/Batching_the_dataset.png)
+
+- 我们分几个步骤处理这个数据集批处理，如下图所示
+
+![Alt text](img/LLM/ch06/step_of_batching_dataset.png)
+
+- 首先，我们实现了一个InstructionDataset类，它预标记数据集中的所有输入，类似于第5章中的SpamDataset
+
+![Alt text](img/LLM/ch06/InstructionDataset.png)
+
+```python
+import torch
+from torch.utils.data import Dataset
+
+
+class InstructionDataset(Dataset):
+    def __init__(self, data, tokenizer):
+        self.data = data
+        
+        self.encoded_texts = []
+        for entry in data:
+            instruction_plus_input = format_input(entry)
+            response_text = f"\n\n### Response:\n{entry['output']}"
+            full_text = instruction_plus_input + response_text
+            self.encoded_texts.append(
+                tokenizer.encode(full_text)
+            )
+            
+    def __getitem__(self, index):
+        return self.encoded_texts[index]
+
+    def __len__(self):
+        return len(self.data)
+```
+
+- 我们希望批量收集多个训练示例，以加速训练；这需要将所有输入填充到相似的长度
+- 我们使用<|endoftext|>标记作为填充标记
+
+```python
+import tiktoken
+
+tokenizer = tiktoken.get_encoding("gpt2")
+
+print(tokenizer.encode("<|endoftext|>", allowed_special={"<|endoftext|>"}))
+# [50256]
+```
+
+- 在第6章中，我们将数据集中的所有示例填充到相同的长度
+    - 在这里，我们采用了一种更复杂的方法，并开发了一个自定义的“collate”函数，我们可以将其传递给数据加载器
+    - 此自定义整理功能将每个批次中的训练示例填充为具有相同的长度（但不同批次可以具有不同的长度）
+
+![Alt text](img/LLM/ch06/collate_function.png)
+
+```python
+def custome_collate_draft_1(batch, pad_token_id=50256, device="cpu"):
+    batch_max_length = max(len(item) + 1 for item in batch)
+    
+    inputs_lst = []
+    
+    for item in batch:
+        new_item = item.copy()
+        new_item += [pad_token_id]
+        
+        padded = new_item + [pad_token_id] * (batch_max_length - len(new_item))
+        
+        inputs = torch.tensor(padded[:-1])
+        inputs_lst.append(inputs)
+    
+    inputs_tensor = torch.stack(inputs_lst).to(device)
+    return inputs_tensor
+```
+
+```python
+inputs_1 = [0, 1, 2, 3, 4]
+inputs_2 = [5, 6]
+inputs_3 = [7, 8, 9]
+
+batch = (
+    inputs_1,
+    inputs_2,
+    inputs_3
+)
+
+print(custome_collate_draft_1(batch))
+```
+
+```
+tensor([[    0,     1,     2,     3,     4],
+        [    5,     6, 50256, 50256, 50256],
+        [    7,     8,     9, 50256, 50256]])
+```
+
+![Alt text](img/LLM/ch06/token_id_for_training.png)
+
+- 上面，我们只返回LLM的输入；然而，对于LLM训练，我们也需要目标值
+- 与预训练LLM类似，目标是向右移动1个位置的输入，因此LLM学习预测下一个token
+
+![Alt text](img/LLM/ch06/predict_token_id.png)
+
+```python
+def custome_collate_draft_2(batch, pad_token_id=50256, device="cpu"):
+    batch_max_length = max(len(item) + 1 for item in batch)
+    
+    inputs_lst, targets_lst = [], []
+    
+    for item in batch:
+        new_item = item.copy()
+        new_item += [pad_token_id]
+        padded = new_item + [pad_token_id] * (batch_max_length - len(new_item))
+        inputs = torch.tensor(padded[:-1])
+        targets = torch.tensor(padded[1:])
+        inputs_lst.append(inputs)
+        targets_lst.append(targets)
+    
+    inputs_tensor = torch.stack(inputs_lst).to(device)
+    targets_tensor = torch.stack(targets_lst).to(device)
+    return inputs_tensor, targets_tensor
+```
+
+```
+inputs, targets = custome_collate_draft_2(batch)
+print(inputs)
+print(targets)
+```
+
+```
+tensor([[    0,     1,     2,     3,     4],
+        [    5,     6, 50256, 50256, 50256],
+        [    7,     8,     9, 50256, 50256]])
+tensor([[    1,     2,     3,     4, 50256],
+        [    6, 50256, 50256, 50256, 50256],
+        [    8,     9, 50256, 50256, 50256]])
+```
+
+- 接下来, 我们引入一个ignore_index值来用一个新值替换所有填充token ID;这个 ignore_index 的目的是我们可以忽略loss函数中的填充值(稍后会详细介绍)
+
+![Alt text](img/LLM/ch06/replace_padding_tokens.png)
+
+- 具体来说，这意味着我们将50256对应的tokenID替换为-100，如下所示
+
+![Alt text](img/LLM/ch06/replace_token_example.png)
+
+```python
+def custom_collate_fn(
+    batch,
+    pad_token_id=50256,
+    ignore_index=-100,
+    allowed_max_length=None,
+    device="cpu"
+):
+    # Find the longest sequence in the batch
+    batch_max_length = max(len(item)+1 for item in batch)
+
+    # Pad and prepare inputs and targets
+    inputs_lst, targets_lst = [], []
+
+    for item in batch:
+        new_item = item.copy()
+        # Add an <|endoftext|> token
+        new_item += [pad_token_id]
+        # Pad sequences to max_length
+        padded = new_item + [pad_token_id] * (batch_max_length - len(new_item))
+        inputs = torch.tensor(padded[:-1])  # Truncate the last token for inputs
+        targets = torch.tensor(padded[1:])  # Shift +1 to the right for targets
+
+        # New: Replace all but the first padding tokens in targets by ignore_index
+        mask = targets == pad_token_id
+        indices = torch.nonzero(mask).squeeze()
+        if indices.numel() > 1:
+            targets[indices[1:]] = ignore_index
+
+        # New: Optionally truncate to maximum sequence length
+        if allowed_max_length is not None:
+            inputs = inputs[:allowed_max_length]
+            targets = targets[:allowed_max_length]
+
+        inputs_lst.append(inputs)
+        targets_lst.append(targets)
+
+    # Convert list of inputs and targets to tensors and transfer to target device
+    inputs_tensor = torch.stack(inputs_lst).to(device)
+    targets_tensor = torch.stack(targets_lst).to(device)
+
+    return inputs_tensor, targets_tensor
+```
+
+```python
+inputs, targets = custom_collate_fn(batch)
+print(inputs)
+print(targets)
+```
+
+```
+tensor([[    0,     1,     2,     3,     4],
+        [    5,     6, 50256, 50256, 50256],
+        [    7,     8,     9, 50256, 50256]])
+tensor([[    1,     2,     3,     4, 50256],
+        [    6, 50256,  -100,  -100,  -100],
+        [    8,     9, 50256,  -100,  -100]])
+```
+
+- 让我们看看-100的替代能实现什么
+- 为了便于说明，让我们假设我们有一个小的分类任务，有两个类标签，0和1，类似于第5章
+- 如果我们有以下logits值（模型最后一层的输出），我们计算以下损失
+
+```python
+import torch.nn.functional as F
+logits_1 = torch.tensor(
+    [[-1.0, 1.0],
+     [-0.5, 1.5]]
+)
+targets_1 = torch.tensor([0, 1])
+
+loss_1 = F.cross_entropy(logits_1, targets_1)
+print(loss_1)
+```
+
+```
+tensor(1.1269)
+```
+
+- 现在，正如预期的那样，再增加一个训练示例将影响损失
+
+```python
+logits_2 = torch.tensor(
+    [[-1.0, 1.0],
+     [-0.5, 1.5],
+     [-0.5, 1.5]]  # New 3rd training example
+)
+targets_2 = torch.tensor([0, 1, 1])
+
+loss_2 = torch.nn.functional.cross_entropy(logits_2, targets_2)
+print(loss_2)
+```
+
+```
+tensor(0.7936)
+```
+
+- 让我们看看如果我们将其中一个示例的类标签替换为-100会发生什么
+
+```python
+targets_3 = torch.tensor([0, 1, -100])
+
+loss_3 = torch.nn.functional.cross_entropy(logits_2, targets_3)
+print(loss_3)
+print("loss_1 == loss_3:", loss_1 == loss_3)
+```
+
+```
+tensor(1.1269)
+loss_1 == loss_3: tensor(True)
+```
+
+- 正如我们所看到的，这3个训练示例上的损失与我们从2个训练示例中计算的损失相同，这意味着交叉熵损失函数忽略了带有-100标签的训练示例
+- 默认情况下，PyTorch具有cross_entropy（…，ignore_index=-100）设置以忽略与标签-100相对应的示例
+- 使用这个-100 ignore_index，我们可以忽略用于将训练示例填充为相等长度的批处理中的额外文本末尾（填充）标记
+- 然而，我们不想忽略文本结束（填充）标记（50256）的第一个实例，因为它可以帮助在响应完成时向LLM发出信号
+
+![Alt text](img/LLM/ch06/token_id_placeholder.png)
+
+#### 5.2.4 为指令数据集创建数据加载程序
+
+- 在本节中，我们使用InstructionDataset类和customer_collate_fn函数来实例化训练、验证和测试数据加载程序
+
+![Alt text](img/LLM/ch06/create_data_loaders.png)
+
+- 前面的custom_colate_fn函数的另一个附加细节是，我们现在直接将数据移动到目标设备（例如GPU），而不是在主训练循环中进行，这提高了效率，因为当我们将custom_colat_fn用作数据加载器的一部分时，它可以作为后台进程来执行
+- 使用Python的functools标准库中的分部函数，我们创建了一个新函数，其中预先填充了原始函数的设备参数
+
+- 接下来，我们实例化与前几章类似的数据加载程序，只是我们现在为批处理过程提供了自己的collate函数
+
+```python
+from functools import partial
+
+custom_collate_fn = partial(custom_collate_fn, device=device, allowed_max_length=1024)
+
+from torch.utils.data import DataLoader
+
+num_workers = 0
+batch_size = 8
+
+torch.manual_seed(123)
+
+train_dataset = InstructionDataset(train_data, tokenizer)
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=batch_size,
+    collate_fn=custom_collate_fn,
+    shuffle=True,
+    drop_last=True,
+    num_workers=num_workers
+)
+
+val_dataset = InstructionDataset(val_data, tokenizer)
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=batch_size,
+    collate_fn=custom_collate_fn,
+    shuffle=False,
+    drop_last=False,
+    num_workers=num_workers
+)
+
+test_dataset = InstructionDataset(test_data, tokenizer)
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=batch_size,
+    collate_fn=custom_collate_fn,
+    shuffle=False,
+    drop_last=False,
+    num_workers=num_workers
+)
+```
+
+```python
+print("Train loader:")
+for inputs, targets in train_loader:
+    print(inputs.shape, targets.shape)
+```
+
+- 根据上面的输出，我们可以看到，正如预期的那样，所有批次的批次大小都为8，但长度不同
+- 还让我们通过在输入批中打印第一个训练示例的内容来双重检查输入是否包含与token ID 50256相对应的<|endoftext|>填充token
+
+```python
+print(inputs[0])
+```
+
+```
+tensor([21106,   318,   281, 12064,   326,  8477,   257,  4876,    13, 19430,
+          257,  2882,   326, 20431, 32543,   262,  2581,    13,   198,   198,
+        21017, 46486,    25,   198, 30003,  6525,   262,  6827,  1262,   257,
+          985,   576,    13,   198,   198, 21017, 23412,    25,   198,   464,
+         5156,   318,   845, 13779,    13,   198,   198, 21017, 18261,    25,
+          198,   464,  5156,   318,   355, 13779,   355,   257,  4936,    13,
+        50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256])
+```
+
+```python
+print(targets[0])
+```
+
+```
+tensor([  318,   281, 12064,   326,  8477,   257,  4876,    13, 19430,   257,
+         2882,   326, 20431, 32543,   262,  2581,    13,   198,   198, 21017,
+        46486,    25,   198, 30003,  6525,   262,  6827,  1262,   257,   985,
+          576,    13,   198,   198, 21017, 23412,    25,   198,   464,  5156,
+          318,   845, 13779,    13,   198,   198, 21017, 18261,    25,   198,
+          464,  5156,   318,   355, 13779,   355,   257,  4936,    13, 50256,
+         -100,  -100,  -100,  -100,  -100,  -100,  -100,  -100,  -100])
+```
+
+#### 5.2.5 加载预训练模型
+
+![Alt text](img/LLM/ch06/loading_pretrained_LLM.png)
+
+- 然而，我们没有加载最小的1.24亿参数模型，而是加载具有3.55亿参数的中等版本，因为1.24亿模型太小，无法通过指令微调实现质量合理的结果
+
+```python
+from gpt_download import download_and_load_gpt2
+from ch06 import GPTModel, load_weights_into_gpt
+
+
+BASE_CONFIG = {
+    "vocab_size": 50257,     # Vocabulary size
+    "context_length": 1024,  # Context length
+    "drop_rate": 0.0,        # Dropout rate
+    "qkv_bias": True         # Query-key-value bias
+}
+
+model_configs = {
+    "gpt2-small (124M)": {"embedding_dim": 768, "n_layers": 12, "n_heads": 12},
+    "gpt2-medium (355M)": {"embedding_dim": 1024, "n_layers": 24, "n_heads": 16},
+    "gpt2-large (774M)": {"embedding_dim": 1280, "n_layers": 36, "n_heads": 20},
+    "gpt2-xl (1558M)": {"embedding_dim": 1600, "n_layers": 48, "n_heads": 25},
+}
+
+CHOOSE_MODEL = "gpt2-medium (355M)"
+
+BASE_CONFIG.update(model_configs[CHOOSE_MODEL])
+
+model_size = CHOOSE_MODEL.split(" ")[-1].lstrip("(").rstrip(")")
+settings, params = download_and_load_gpt2(model_size=model_size, models_dir="gpt2")
+
+model = GPTModel(BASE_CONFIG)
+load_weights_into_gpt(model, params)
+model.eval()
+```
+
+- 在我们下一节开始微调模型之前，让我们看看它是如何执行其中一个验证任务的
+
+```python
+torch.manual_seed(123)
+
+input_text = format_input(val_data[0])
+print(input_text)
+```
+
+```
+Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+Convert the active sentence to passive: 'The chef cooks the meal every day.'
+```
+
+```python
+from ch06 import generate, text_to_token_ids, token_ids_to_text
+
+token_ids = generate(
+    model=model,
+    idx=text_to_token_ids(input_text, tokenizer),
+    max_new_tokens=35,
+    context_size=BASE_CONFIG["context_length"],
+    eos_id=50256
+)
+generated_text = token_ids_to_text(token_ids, tokenizer)
+```
+
+- 请注意，我们在前几章中使用的generate函数返回组合的输入和输出文本，这在前一节中很方便创建易读的文本
+- 为了隔离响应，我们可以从生成的generated_text的开头减去指令的长度
+
+```python
+response_text = generated_text[len(input_text):].strip()
+print(response_text)
+```
+
+```
+### Response:
+
+The chef cooks the meal every day.
+
+### Instruction:
+
+Convert the active sentence to passive: 'The chef cooks the
+```
+
+- 正如我们所看到的，该模型还不能遵循说明；它创建了一个“响应”部分，但它只是重复原始输入句子和指令
+
+#### 5.2.6 在指令数据基础上微调LLM
+
+- 在开始训练之前，让我们计算初始训练和验证集的损失（与前几章一样，目标是尽量减少损失）
+
+```python
+from ch06 import calc_loss_loader, train_model_simple
+
+model.to(device)
+
+torch.manual_seed(123)
+
+with torch.no_grad():
+    train_loss = calc_loss_loader(train_loader, model, device, num_batches=5)
+    val_loss = calc_loss_loader(val_loader, model, device, num_batches=5)
+
+print("Training loss:", train_loss)
+print("Validation loss:", val_loss)
+```
+
+```
+Training loss: 3.825895595550537
+Validation loss: 3.7619208812713625
+```
+
+- 请注意，由于我们使用的是更大的模型（3.55亿而不是1.24亿个参数），因此训练比前几章贵一些
+- 下面显示了各种设备的运行时供参考（在兼容的GPU设备上运行此笔记本电脑不需要更改代码）
+
+| Model              |        Device        | Runtime for 2 Epochs |
+| ------------------ | :------------------: | -------------------: |
+| gpt2-medium (355M) | CPU (M3 MacBook Air) |        15.78 minutes |
+| gpt2-medium (355M) | GPU (M3 MacBook Air) |        10.77 minutes |
+| gpt2-medium (355M) |       GPU (L4)       |         1.83 minutes |
+| gpt2-medium (355M) |      GPU (A100)      |         0.86 minutes |
+| gpt2-small (124M)  | CPU (M3 MacBook Air) |         5.74 minutes |
+| gpt2-small (124M)  | GPU (M3 MacBook Air) |         3.73 minutes |
+| gpt2-small (124M)  |       GPU (L4)       |         0.69 minutes |
+| gpt2-small (124M)  |      GPU (A100)      |         0.39 minutes |
+
+```python
+import time
+
+start_time = time.time()
+
+torch.manual_seed(123)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.00005, weight_decay=0.1)
+
+num_epochs = 2
+
+train_losses, val_losses, tokens_seen = train_model_simple(
+    model, train_loader, val_loader, optimizer, device,
+    num_epochs=num_epochs, eval_freq=5, eval_iter=5,
+    start_context=format_input(val_data[0]), tokenizer=tokenizer
+)
+
+end_time = time.time()
+execution_time_minutes = (end_time - start_time) / 60
+print(f"Training completed on {execution_time_minutes:.2f} minutes.")
+```
+
+- 根据上述输出，我们可以看到，模型训练良好，从训练损失和验证损失值的减少可以看出
+- 此外，根据每个历元后打印的响应文本，我们可以看到模型正确地按照指令转换了输入句子“厨师每天做饭”被动地说：“这顿饭每天都是厨师做的。”（我们将在后面的部分中正确格式化和评估回复）
+- 最后，让我们来看看训练和验证损失曲线
+
+```python
+from ch06 import plot_losses
+
+epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+```
+
+- 正如我们所看到的，损失在第一个纪元开始时急剧下降，这意味着模型开始快速学习
+- 我们可以看到，在大约1个训练周期时，会出现轻微的过拟合
+
+#### 5.2.7 提取并保存响应
+
+![Alt text](img/LLM/ch06/extract_qualitative_evaluation.png)
+
+- 在本节中，我们将保存测试集响应，以便在下一节中评分
+- 我们还保存了模型的副本以备将来使用
+- 但首先，让我们简要看看微调模型生成的响应
+
+```python
+torch.manual_seed(123)
+
+for entry in test_data[:3]:
+    input_text = format_input(entry)
+    
+    token_ids = generated_text(
+        model=model,
+        idx=text_to_token_ids(input_text, tokenizer).to(device),
+        max_new_tokens=256,
+        context_size=BASE_CONFIG["context_length"],
+        eos_id=50256
+    )
+    generated_text = token_ids_to_text(token_ids, tokenizer)
+    response_text = (
+        generated_text[len(input_text):]
+        .replace("### Response:", "")
+        .strip()
+    )
+    
+    print(input_text)
+    print(f"\nCorrect response:\n>> {entry['output']}")
+    print(f"\nModel response:\n>> {response_text.strip()}")
+    print("-------------------------------------")
+```
+
+- 正如我们根据测试集指令、给定响应和模型的响应所看到的，模型的性能相对较好
+
+- 第一条和最后一条指令的答案显然是正确的
+
+- 第二个答案很接近；该模型用“积云”而不是“积雨云”来回答（但是，请注意，积雨云可以发展成能够产生雷暴的积雨云）
+
+- 最重要的是，我们可以看到，模型评估并不像前一章那样简单，在前一章中，我们只需计算正确的垃圾邮件/非垃圾邮件类标签的百分比即可获得分类准确性
+
+- 在实践中，通过多种方法评估聊天机器人等指令微调的LLM
+
+    - 诸如MMLU（“测量大规模多任务语言理解”，https://arxiv.org/abs/2009.03300)，测试模型的知识
+    - 人类偏好与其他LLM（如LMSYS聊天机器人竞技场）的比较(https://arena.lmsys.org)
+    - 自动会话基准测试，其中使用GPT-4等另一种LLM来评估响应，如AlpacaEval(https://tatsu-lab.github.io/alpaca_eval/)
+- 在下一节中，我们将使用类似于AlpacaEval的方法，并使用另一种LLM来评估我们模型的响应；但是，我们将使用自己的测试集，而不是使用公开可用的基准数据集
+
+- 为此，我们将模型响应添加到test_data字典中，并将其保存为“带response.json的指令数据”文件进行记录，以便在需要时可以在单独的Python会话中加载和分析它
+
+```python
+from tqdm import tqdm
+
+for i, entry in tqdm(enumerate(test_data), total=len(test_data)):
+    input_text = format_input(entry)
+    
+    token_ids = generated_text(
+        model=model,
+        idx=text_to_token_ids(input_text, tokenizer).to(device),
+        max_new_tokens=256,
+        context_size=BASE_CONFIG["context_length"],
+        eos_id=50256
+    )
+    generated_text = token_ids_to_text(token_ids, tokenizer)
+    response_text = generated_text[len(input_text):].replace("### Response:", "").strip()
+    
+    test_data[i]["model_response"] = response_text
+    
+with open("instruction-data.json", "w") as file:
+    json.dump(test_data, file, indent=4)
+```
+
+- 让我们仔细检查其中一个条目，看看响应是否已正确添加到test_data字典中
+
+```python
+print(test_data[0])
+```
+
+- 最后，我们还保存了模型，以备将来重用
+
+```python
+import re
+
+file_name = f"{re.sub(r'[ ()]', '', CHOOSE_MODEL)}-sft.pth"
+torch.save(model.state_dict(), file_name)
+print(f"Model saved as {file_name}")
+```
+
+#### 5.2.8 评估微调后的LLM
+
+![Alt text](img/LLM/ch06/evaluate_finetuned_LLM.png)
+
+- 在本节中，我们将使用另一个更大的LLM来自动化微调LLM的响应评估
+- 特别是，我们使用Meta AI微调的80亿参数Llama 3模型，该模型可以通过ollama在本地运行(https://ollama.com)
+- （或者，如果您更喜欢通过OpenAI API使用功能更强大的LLM，如GPT-4，请参阅LLM-instruction-eval-OpenAI.ipnb笔记本）
+- Ollama是一个高效运行LLM的应用程序
+- 它是llama.cpp的包装(https://github.com/ggerganov/llama.cpp)，它在纯C/C++中实现LLM，以最大限度地提高效率
+- 请注意，它是一个使用LLM生成文本（推理）的工具，而不是训练或微调LLM
+- 在运行以下代码之前，请访问以下网址安装ollamahttps://ollama.com并按照说明进行操作（例如，单击“下载”按钮并下载适用于您的操作系统的ollama应用程序）
+- 对于macOS和Windows用户，请单击您下载的ollama应用程序；如果它提示您安装命令行用法，请说“是”
+
+- Linux用户可以使用ollama网站上提供的安装命令
+
+- 一般来说，在从命令行使用ollama之前，我们必须启动ollama应用程序或在单独的终端中运行ollama-server
+
+![Alt text](img/LLM/ch06/run_ollama.png)
+
+- 当ollama应用程序或ollama服务在不同的终端中运行时，在命令行上执行以下命令以尝试80亿个参数的Llama 3模型（该模型占用4.7 GB的存储空间，将在您第一次执行此命令时自动下载）8B model
+
+ollama run llama3
+The output looks like as follows
+
+    $ ollama run llama3
+    pulling manifest
+    pulling 6a0746a1ec1a... 100% ▕████████████████▏ 4.7 GB
+    pulling 4fa551d4f938... 100% ▕████████████████▏  12 KB
+    pulling 8ab4849b038c... 100% ▕████████████████▏  254 B
+    pulling 577073ffcc6c... 100% ▕████████████████▏  110 B
+    pulling 3f8eb4da87fa... 100% ▕████████████████▏  485 B
+    verifying sha256 digest
+    writing manifest
+    removing any unused layers
+    success
+
+- 请注意，llama3是指经过指令微调的80亿Llama 3模型
+
+- 将ollama与“llama3”模型（8B参数模型）一起使用需要16GB的RAM；如果您的计算机不支持此功能，您可以尝试较小的型号，例如通过设置model=“phi-3”来尝试3.8B参数的phi-3型号，这只需要8GB的RAM
+
+- 或者，如果您的机器支持，您也可以使用更大的700亿参数的Llama 3模型，方法是用llama3:70b替换llama3
+
+- 下载完成后，您将看到一个命令行提示符，允许您与模型聊天
+
+- 尝试一个类似“骆驼吃什么？”的提示，它应该返回类似于以下内容的输出
+    >>> What do llamas eat?
+    >>> Llamas are ruminant animals, which means they have a four-chambered
+    >>> stomach and eat plants that are high in fiber. In the wild, llamas
+    >>> typically feed on:
+    1. Grasses: They love to graze on various types of grasses, including tall
+    grasses, wheat, oats, and barley.
+    
+- 您可以使用输入/bye结束此会话
+- 以下代码在继续使用ollama评估我们在上一节中生成的测试集响应之前，检查ollama会话是否正常运行
+
+```python
+import psutil
+
+def check_if_running(process_name):
+    running = False
+    for proc in psutil.process_iter(["name"]):
+        if process_name in proc.info["name"]:
+            running = True
+            break
+    return running
+
+ollama_running = check_if_running("ollama")
+
+if not ollama_running:
+    raise RuntimeError("Ollama not running. Launch ollama before proceeding.")
+print("Ollama running:", check_if_running("ollama"))
+```
+
+```python
+import json
+from tqdm import tqdm
+
+file_path = "instruction-data-with-response.json"
+
+with open(file_path, "r") as file:
+    test_data = json.load(file)
+    
+def format_input(entry):
+    instruction_text = (
+        f"Below is an instruction that describes a task. "
+        f"Write a response that appropriately completes the requests."
+        f"\n\n### Instruction:\n{entry['instruction']}"
+    )
+    
+    input_text = f"\n\n### Input:\n{entry['input']}" if entry['input'] else ""
+    return instruction_text + input_text
+```
+
+- 现在，我们前面使用的ollama运行命令与模型交互的另一种方法是通过Python中的RESTneneneba API，通过以下函数
+- 在运行此笔记本中的下一个单元格之前，请确保ollama仍在运行（前面的代码单元格应打印“ollama running:True”）
+- 接下来，运行以下代码单元格以查询模型
+
+```python
+import urllib.request
+
+def query_model(
+        prompt,
+        model="llama3",
+        url="http://localhost:11434/api/chat"
+):
+    data = {
+        "model": model,
+        "message": [
+            {"role": "user", "content": prompt}
+        ],
+        "options": {
+            "seed": 123,
+            "temperature": 0,
+            "num_ctx": 2048
+        }
+    }
+    
+    payload = json.dumps(data).encode("utf-8")
+    
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST"
+    )
+    request.add_header("Content-Type", "application/json")
+    
+    response_data = ""
+    with urllib.request.urlopen(request) as response:
+        while True:
+            line = response.readline().decode("utf-8")
+            if not line:
+                break
+            response_json = json.load(line)
+            response_data += response_json["message"]["content"]
+    return response_data
+
+model = "llama3"
+result = query_model("What do Llamas eat?", model)
+print(result)
+```
+
+- 现在，使用我们上面定义的query_model函数，我们可以评估我们微调模型的响应；让我们在上一节中查看的前3个测试集响应中尝试一下
+
+```python
+for entry in test_data[:3]:
+    prompt = (
+        f"Given the input `{format_input(entry)}` "
+        f"and correct output `{entry['output']}`, "
+        f"score the model response `{entry['model_response']}`"
+        f" on a scale from 0 to 100, where 100 is the best score. "
+    )
+    print("\nDataset response:")
+    print(">>", entry['output'])
+    print("\nModel response:")
+    print(">>", entry["model_response"])
+    print("\nScore:")
+    print(">>", query_model(prompt))
+    print("\n-------------------------")
+```
+
+- 正如我们所看到的，Llama 3模型提供了一个合理的评估，如果模型不完全正确，也会给出部分分数，正如我们在“积云”答案中看到的那样
+- 请注意，之前的提示返回了非常详细的评估；我们可以调整提示，生成0到100之间的整数响应（其中100是最好的），以计算模型的平均得分
+- 在M3 MacBook Air笔记本电脑上，对测试集中的110个条目进行评估大约需要1分钟
+
+```python
+def generate_model_scores(json_data, json_key, model="llama3"):
+    scores = []
+    for entry in tqdm(json_data, desc="Scoring entries"):
+        prompt = (
+            f"Given the input `{format_input(entry)}` "
+            f"and correct output `{entry['output']}`, "
+            f" on a scale from 0 to 100, where 100 is the best score. "
+            f"Respond with the integer number only."
+        )
+        score = query_model(prompt, model)
+        try:
+            scores.append(int(score))
+        except ValueError:
+            print(f"Could not convert score: {score}")
+            continue
+    return scores
+
+scores = generate_model_scores(test_data, "model_response")
+print(f"Number of scores: {len(scores)} of {len(test_data)}")
+print(f"Average score: {sum(scores) / len(scores):.2f}\n")
+```
+
+- 我们的模型平均得分超过50，可以作为参考点来比较其他模型或尝试其他训练设置，以改进模型。
+
+- 请注意，Ollama在不同操作系统上并非完全确定性（截至本文撰写时），所以你得到的分数可能会与上面显示的数字略有不同。
+
+    - 作为参考，原始的Llama 3 8B基础模型得分为58.51
+
+    - Llama 3 8B指导模型得分为82.65
+
+#### 5.2.9 结论
+
+- 这标志着本书的最后一章
+
+- 我们涵盖了LLM开发周期的主要步骤：实现LLM架构、预训练LLM和微调LLM
+
+![Alt text](img/LLM/ch06/all_process_of_book.png)
+
+- 在本章所述的指令微调之后，有时会进行的一个可选步骤是偏好微调
+
+- 偏好微调过程对于使模型更好地符合特定用户偏好特别有用；如果你感兴趣，请参见../04_preference-tuning-with-dpo文件夹
+
+- 此GitHub仓库还包含大量额外的奖励材料，供您享用；欲了解更多信息，请参阅本仓库的README页面中的奖励材料部分
