@@ -1,5 +1,5 @@
 """
-特征交叉方式 3/5：PNN (Product-based Neural Network)。
+特征交叉方式：PNN (Product-based Neural Network)。
 内积 / 外积得到交叉矩阵，再经 MLP 或与原始嵌入 concat 后向下游传递。
 """
 

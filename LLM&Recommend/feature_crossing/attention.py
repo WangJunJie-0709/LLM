@@ -1,5 +1,5 @@
 """
-特征交叉方式 2/5：Attention。
+特征交叉方式：Attention。
 对多组嵌入做 Attention 加权聚合或交叉，用于 DIN 等序列兴趣建模。
 """
 
