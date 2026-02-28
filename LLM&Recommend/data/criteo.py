@@ -18,9 +18,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-
-CRITEO_NUM_DENSE = 13
-CRITEO_NUM_SPARSE = 26
+"""
+Criteo 数据集的特征数量
+"""
+CRITEO_NUM_DENSE = 13  # 稠密特征数量
+CRITEO_NUM_SPARSE = 26  # 稀疏特征数量
 
 
 @dataclass(frozen=True)
