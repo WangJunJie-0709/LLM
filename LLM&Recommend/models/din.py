@@ -4,13 +4,13 @@ DIN (Deep Interest Network)：基于 Attention 的兴趣建模。
 在本实现中，我们与 data.criteo 的约定如下：
 - CriteoCTRDataset 提供：
   - sparse_ids: [B, F]，一条样本的所有稀疏字段；
-  - behavior_ids: [B, L]，由若干字段（feature_spec["behavior_field_indices"]）拼出的伪行为序列；
+  - behavior_ids: [B, L]，由若干字段(feature_spec["behavior_field_indices"]）拼出的伪行为序列；
   - dense: [B, D_dense]，数值特征。
 - DIN 使用：
   - behavior_ids 作为用户「历史行为」序列；
-  - sparse_ids 中的第一个字段作为「候选 item id」（可以按需调整）。
+  - sparse_ids 中的第一个字段作为「候选 item id」(可以按需调整）。
 
-核心思想：用候选 item 对历史行为做 Attention，加权聚合得到兴趣向量，再与候选 + dense 一起送入 DNN。
+核心思想：用候选 item 对历史行为做 Attention,加权聚合得到兴趣向量,再与候选 + dense 一起送入 DNN。
 """
 
 from typing import Any, Dict, Optional, Sequence, List
@@ -23,7 +23,7 @@ from .base import BaseCTRModel
 
 
 class DIN(BaseCTRModel):
-    """DIN：行为序列 + 候选 item，Attention 加权聚合后进 DNN。"""
+    """DIN:行为序列 + 候选 item,Attention 加权聚合后进 DNN。"""
 
     def __init__(
         self,
@@ -135,17 +135,17 @@ class DIN(BaseCTRModel):
         **kwargs: Any,
     ) -> torch.Tensor:
         """
-        DIN 前向：behavior_ids 为序列，与候选 item 做 Attention 后输出 logits。
+        DIN 前向:behavior_ids 为序列，与候选 item 做 Attention 后输出 logits。
 
         参数：
-        - sparse_ids: [B, F]，其中第 0 列视为候选 item id（可根据业务调整）；
+        - sparse_ids: [B, F]，其中第 0 列视为候选 item id(可根据业务调整);
         - behavior_ids: [B, L]，用户行为序列；
         - dense: [B, D_dense]，数值特征。
         """
         if sparse_ids is None:
-            raise ValueError("DIN 需要 sparse_ids（至少包含一个候选 item 字段）。")
+            raise ValueError("DIN 需要 sparse_ids(至少包含一个候选 item 字段）。")
         if behavior_ids is None:
-            raise ValueError("DIN 需要 behavior_ids 作为用户行为序列（shape = [batch, seq_len]）。")
+            raise ValueError("DIN 需要 behavior_ids 作为用户行为序列(shape = [batch, seq_len]）。")
 
         # 候选 item id：简单取 sparse_ids 的第一个字段，
         # 工程上可以在 feature_spec 中额外显式标记。
@@ -174,6 +174,6 @@ class DIN(BaseCTRModel):
         """
         返回 Attention 聚合后的用户兴趣向量，供 T-SNE 可视化使用。
 
-        注意：该向量基于「行为序列 + 候选 item」的注意力权重，能更好反映当前推荐场景下的兴趣状态。
+        注意：该向量基于「行为序列 + 候选 item」的注意力权重,能更好反映当前推荐场景下的兴趣状态。
         """
         return self._last_user_embedding
